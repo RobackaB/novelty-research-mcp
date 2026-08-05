@@ -1,0 +1,34 @@
+# Tajné kľúče — NIKDY nesmú ísť do repozitára.
+.env
+.env.*
+!.env.example
+env.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Testy a nástroje
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Dáta behu (SQLite databáza prieskumov)
+data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Operačný systém a editory
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -4,6 +4,15 @@ Tento balík obsahuje finálny prototyp MCP servera a exportovanú Flowise archi
 
 Výstup systému je pomocný prieskum, nie právny alebo patentový posudok.
 
+> **O tomto repozitári**
+>
+> Tag `v1.0-thesis` označuje kód presne v tom stave, v akom bol odovzdaný ako
+> bakalárska práca — bez akýchkoľvek dodatočných úprav. Ďalšie commity sú
+> vylepšenia, ktoré na tomto základe postupne pribúdajú (opravy chýb, testovacia
+> sada, meranie kvality výstupu). Vývoj tak zostáva dohľadateľný od pôvodnej
+> odovzdanej verzie.
+
+
 ## Čo je v balíku
 
 - `server_http.py` - HTTP vstup pre MCP server používaný pri Docker spustení.
