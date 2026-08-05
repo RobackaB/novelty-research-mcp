@@ -8,8 +8,6 @@ evidence level for every finding.
 Orchestrated through [Flowise](https://flowiseai.com/); the retrieval, grading and report
 generation happen entirely inside the MCP server.
 
-> The output is preliminary research, **not** a legal or patentability opinion.
-
 *[Slovenská verzia README](README.sk.md)*
 
 ---
@@ -75,8 +73,6 @@ Every finding carries the level of verification that was actually reached:
 | `verified_metadata` / `fetched_excerpt` | Metadata or page text was retrieved |
 | `search_snippet_only` | Only a search-result snippet — weak evidence |
 | `fetch_failed` / `fetch_timeout` | Retrieval failed; **not** evidence of absence |
-
-A failed or partial retrieval is never reported as proof that no prior art exists.
 
 ## Requirements
 
@@ -152,8 +148,13 @@ Flowise state lives in the `flowise_data` Docker volume; the research SQLite dat
 `mcp_research_data` at `/app/data/research_sessions.sqlite3`.
 
 ```bash
-docker compose down     # keeps the data
-docker compose down -v  # removes the volumes as well
+docker compose down
+```
+
+This keeps the data. To remove the volumes as well:
+
+```bash
+docker compose down -v
 ```
 
 ## Repository contents

@@ -2,8 +2,6 @@
 
 Tento balík obsahuje finálny prototyp MCP servera a exportovanú Flowise architektúru použitú v práci. Systém slúži na predbežný prieskum stavu techniky z patentových, publikačných a webových zdrojov.
 
-Výstup systému je pomocný prieskum, nie právny alebo patentový posudok.
-
 *[English README](README.md)*
 
 > **O tomto repozitári**

@@ -1,7 +1,5 @@
-# Zjednotené konce riadkov v repozitári bez ohľadu na operačný systém.
 * text=auto eol=lf
 
-# Binárne súbory sa nesmú upravovať.
 *.png binary
 *.jpg binary
 *.pdf binary
