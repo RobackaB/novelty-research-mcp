@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-research-server"
+version = "0.1.0"
+description = "MCP server for web, patent, and publication research."
+requires-python = ">=3.11"
+dependencies = [
+  "mcp>=1.0.0",
+  "httpx>=0.27.0",
+  "playwright>=1.44.0",
+  "beautifulsoup4>=4.12.0",
+  "lxml>=5.0.0",
+  "arxiv>=2.1.0",
+  "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+mcp-research-server = "server:main"
+
+[tool.setuptools]
+py-modules = ["server"]
+packages = ["tools"]

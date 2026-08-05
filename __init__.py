@@ -1,0 +1,1 @@
+"""mcp_research_server package."""
