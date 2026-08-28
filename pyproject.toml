@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-research-server"
-version = "0.9.3"
+version = "0.9.4"
 description = "MCP server for web, patent, and publication research."
 requires-python = ">=3.11"
 dependencies = [

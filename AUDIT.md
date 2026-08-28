@@ -1,4 +1,4 @@
-# Hĺbkový audit a vylepšenia — Flowise MCP Research Server (v0.9.2)
+# Hĺbkový audit a vylepšenia — Flowise MCP Research Server (v0.9.4)
 
 Tento dokument zhŕňa výsledky hĺbkového auditu celej kódovej základne (~6 700 riadkov Pythonu),
 implementované opravy (v0.2.0), kvalitatívne rozšírenie hĺbkovej analýzy zdrojov (v0.3.0,
@@ -8,8 +8,9 @@ dokumentov pre pokrytie prvkov (v0.5.0, sekcia 10), skutočnú AlphaXiv MCP inte
 Flowise (v0.7.0, sekcia 12), obídenie blokovania Google Patents cez oficiálne
 patentové PDF (v0.8.0, sekcia 13), merateľné zlepšenie hodnotenia relevancie
 (v0.9.0, sekcia 14), čistotu textu vo výslednom reporte (v0.9.1, sekcia 15)
-a kvalitu patentových výsledkov pri zablokovanom provideri (v0.9.2, sekcia 16).
-Všetky zmeny sú overené: **266 automatických testov prechádza**, server po
+kvalitu patentových výsledkov pri zablokovanom provideri (v0.9.2, sekcia 16)
+a kvalitu patentových nálezov overenú celým behom (v0.9.4, sekcia 17).
+Všetky zmeny sú overené: **270 automatických testov prechádza**, server po
 zmenách naštartoval a MCP `initialize` handshake vrátil platnú odpoveď.
 
 ## 1. Opravené chyby (korektnosť)
@@ -655,7 +656,48 @@ nesúvisiace patenty.
   vrátane prípadu, keď je správne nevrátiť nič).
 - Overené na skutočnom dáte: skóre očisteného snippetu voči dotazu o logoch kleslo.
 
-## 17. Námety na ďalšie zlepšenia (nezaradené)
+## 17. Kvalita patentových nálezov overená celým behom (v0.9.4)
+
+Prvý kompletný beh systému mimo Flowise odhalil tri ďalšie defekty, ktoré sa
+prejavia až vtedy, keď je hlavný patentový provider zablokovaný.
+
+### 17.1 Patenty nemali doménovú kotvu
+Publikačná vetva vyžaduje, aby nález zdieľal s dotazom predmetový termín;
+patentová takú podmienku nemala. Patent o **porovnávaní obrázkov** tak dosiahol
+skóre **3.58** voči dotazu o anomáliách v logoch a prešiel aj cez hlavný prah 2.8,
+lebo ich spájala len všeobecná technická slovná zásoba (*method*, *system*, *device*).
+
+Váženie vzácnosťou termínov z v0.9.0 to nezachytilo, a to zo štrukturálneho dôvodu:
+všetci kandidáti pochádzali z **jednej patentovej rodiny**, takže každý termín mal
+rovnakú dokumentovú frekvenciu a IDF nemalo čo rozlíšiť.
+
+**Oprava:** `_shares_discriminative_term()` sa uplatňuje na všetkých kandidátov vo
+všetkých vetvách hodnotenia. Po zmene sa na prvé miesta dostali skutočne súvisiace
+patenty (statická analýza kódu, detekcia anomálií v sieťových operáciách).
+
+### 17.2 Zlyhané overenie mazalo už získaný dôkaz
+Keď `patent_fetch` zlyhal alebo bol zablokovaný, úroveň dôkazu sa prepísala na
+`fetch_failed` a vykresľovanie taký nález skrylo. Výsledok bol prevrátený: patenty,
+ktoré sa systém **pokúsil overiť, z reportu zmizli**, zatiaľ čo kandidát mimo
+limitu na overovanie v ňom zostal.
+
+**Oprava:** ak kandidát nesie použiteľný vyhľadávací úryvok, po neúspešnom
+overení sa vráti na `search_snippet_only` namiesto zlyhanej úrovne. Publikačná
+vetva sa takto správala už predtým.
+
+### 17.3 Jedna prihláška zaberala celú sekciu
+Deduplikácia porovnávala len publikačné číslo, takže ten istý vynález podaný pod
+štyrmi číslami (národné, medzinárodné, pokračovania) vyplnil štyri zo šiestich
+miest. **Oprava:** deduplikácia aj podľa normalizovaného názvu.
+
+### 17.4 Overenie v0.9.4
+- `python -m pytest` — **270 passed** (4 nové testy: kotva v hlavnej vetve,
+  zachovanie skutočne súvisiacich patentov, zlúčenie rodiny, ponechanie
+  odlišných krátkych názvov).
+- Opakovaný beh celého workflow po každej oprave; výsledný report je uložený
+  ako `docs/example-report.md`.
+
+## 18. Námety na ďalšie zlepšenia (nezaradené)
 
 - Znovupoužitie jednej Playwright browser inštancie namiesto spúšťania novej pre každý fetch.
 - Perzistentná (SQLite) cache pre patent_fetch medzi reštartmi kontajnera.

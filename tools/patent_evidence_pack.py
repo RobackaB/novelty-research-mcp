@@ -201,6 +201,17 @@ def _clean_hit_text(value: Any) -> str:
     return text.strip(" ,{}[]'\"\\")
 
 
+_MIN_SNIPPET_WORDS = 8
+
+
+def _has_usable_snippet(item: dict[str, Any]) -> bool:
+    """Zistí, či kandidát nesie vlastný vyhľadávací úryvok použiteľný ako dôkaz."""
+    snippet = _clean_hit_text(item.get("snippet") or "")
+    if "No abstract snippet" in snippet:
+        return False
+    return len(snippet.split()) >= _MIN_SNIPPET_WORDS
+
+
 def _worse_status(base_status: str, warnings: list[str], verification_failed: bool) -> str:
     """Zhorší stav evidence packu, ak nastali varovania alebo zlyhalo overenie."""
     if base_status == "failed":
@@ -321,6 +332,12 @@ async def patent_evidence_pack(
             )
         elif fetch_output and evidence_level in {"fetch_timeout", "fetch_failed"}:
             warnings.append(f"Patent fetch did not verify {item.get('url')}: {trim_words(fetch_output, 40)}")
+        if evidence_level in {"fetch_timeout", "fetch_failed"} and _has_usable_snippet(item):
+            # Neúspešné overenie nesmie zmazať dôkaz, ktorý už máme. Bez tohto
+            # kroku sa kandidát prepol na zlyhanú úroveň a vykresľovanie ho
+            # skrylo — patent, ktorý sa systém pokúsil overiť, tak z reportu
+            # zmizol, zatiaľ čo neoverovaný kandidát v ňom zostal.
+            evidence_level = "search_snippet_only"
         url = _clean_hit_text(item.get("url") or "")
         provider = _clean_hit_text(_field(fetch_output, "PROVIDER") or item.get("provider") or search_payload.get("provider") or "")
         attempt_log = _fetch_attempt_log(fetch_output)

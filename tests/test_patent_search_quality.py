@@ -84,6 +84,40 @@ def test_low_confidence_mode_can_return_nothing():
     assert ranked == []
 
 
+def test_domain_anchor_applies_to_the_primary_path_too():
+    """Patent spojený s dotazom len všeobecnou slovnou zásobou nesmie prejsť ani nad prahom.
+
+    Váženie vzácnosťou termínov to nezachytí, keď sú všetci kandidáti z jednej
+    patentovej rodiny — vtedy majú všetky termíny rovnakú frekvenciu.
+    """
+    query = "detecting anomalies in application logs and notifying an administrator"
+    family = [
+        _candidate(
+            f"US{i}",
+            "Method, system and computer program for comparing images",
+            "A method of determining whether a user of a mobile device corresponds to a "
+            "previously authenticated user by acquiring an image from an identity document.",
+        )
+        for i in range(1, 5)
+    ]
+    ranked, _threshold = _rank(query, family, limit=10)
+    assert ranked == [], "obrazova identifikacia nesuvisi s anomaliami v logoch"
+
+
+def test_domain_anchor_keeps_genuinely_related_patents():
+    query = "detecting anomalies in application logs and notifying an administrator"
+    candidates = [
+        _candidate(
+            "US1",
+            "Automatically updating communication maps used to detect anomalies",
+            "Detecting anomalies in logged events and alerting an administrator.",
+        ),
+        _candidate("US2", "Method and apparatus for comparing photographic images", "identity document"),
+    ]
+    ranked, _threshold = _rank(query, candidates, limit=10)
+    assert "US1" in [c.patent_number for c in ranked]
+
+
 def test_high_confidence_results_are_unaffected_by_the_floor():
     query = "smart door lock unlocked by a mobile application with access codes"
     candidates = [
@@ -91,3 +125,25 @@ def test_high_confidence_results_are_unaffected_by_the_floor():
     ]
     ranked, _threshold = _rank(query, candidates, limit=10)
     assert [c.patent_number for c in ranked] == ["US1"]
+
+
+def test_same_invention_under_different_numbers_is_deduplicated():
+    """Jedna prihláška sa vracia pod viacerými publikačnými číslami."""
+    from tools.patent_search import _dedupe
+
+    family = [
+        _candidate("US20250141733", "Automatically updating communication maps to detect failures"),
+        _candidate("US20250141734", "Automatically updating communication maps to detect failures"),
+        _candidate("WO2025090784", "AUTOMATICALLY UPDATING COMMUNICATION MAPS TO DETECT FAILURES"),
+        _candidate("US11556444", "Electronic system for static program code analysis"),
+    ]
+    out = _dedupe(family)
+    assert len(out) == 2
+    assert {c.patent_number for c in out} == {"US20250141733", "US11556444"}
+
+
+def test_dedupe_keeps_distinct_short_titles():
+    from tools.patent_search import _dedupe
+
+    out = _dedupe([_candidate("US1", "Smart lock"), _candidate("US2", "Door bell")])
+    assert len(out) == 2

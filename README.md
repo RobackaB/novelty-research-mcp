@@ -134,6 +134,9 @@ The workflow will call the tools in the order shown in the diagram above and ret
 containing a verdict, a confidence level, the retrieval completeness, per-source quality and
 a list of the sources it actually used.
 
+**[See a full example report](docs/example-report.md)** produced by an actual run, including
+the element-by-element coverage table.
+
 ## Troubleshooting
 
 If Flowise returns no answer or the workflow reports an error:

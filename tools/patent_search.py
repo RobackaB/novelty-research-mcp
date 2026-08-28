@@ -18,7 +18,7 @@ from bs4 import BeautifulSoup
 from ._ttl_cache import TTLCache
 from .output_cleaner import USER_AGENT, trim_words
 from .patent_filters import extract_patent_number
-from .relevance import build_corpus_idf, evidence_score
+from .relevance import build_corpus_idf, discriminative_tokens, evidence_score, tokens
 from .result_contract import NormalizedResult
 
 LOGGER = logging.getLogger(__name__)
@@ -119,15 +119,31 @@ def _normalize_patent_dedupe_key(patent_number: str) -> str:
     return re.sub(r"([A-Z]{2}\d{4,})[A-Z]\d?$", r"\1", raw)
 
 
+def _normalize_title_dedupe_key(title: str) -> str:
+    """Zjednotí názov patentu na kľúč pre rozpoznanie tej istej prihlášky."""
+    return re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).strip()
+
+
 def _dedupe(candidates: list[PatentCandidate]) -> list[PatentCandidate]:
-    """Odstráni duplicitné patentové kandidáty podľa čísla alebo URL adresy."""
+    """Odstráni duplicitné patentové kandidáty podľa čísla, názvu alebo URL adresy.
+
+    Tá istá prihláška sa v jednom výsledku objavuje pod viacerými publikačnými
+    číslami (národné aj medzinárodné podanie, pokračovania). Bez porovnania
+    názvu sa taký vynález dostal do reportu aj štyrikrát a vytláčal iné nálezy.
+    """
     seen: set[str] = set()
+    seen_titles: set[str] = set()
     out: list[PatentCandidate] = []
     for candidate in candidates:
         key = _normalize_patent_dedupe_key(candidate.patent_number) or candidate.url
         if not key or key in seen:
             continue
+        title_key = _normalize_title_dedupe_key(candidate.title)
+        if title_key and len(title_key) >= 12 and title_key in seen_titles:
+            continue
         seen.add(key)
+        if title_key:
+            seen_titles.add(title_key)
         out.append(candidate)
     return out
 
@@ -408,6 +424,18 @@ async def _wipo_patentscope_search(client: httpx.AsyncClient, query: str, limit:
     return _dedupe(candidates)[:PROVIDER_CANDIDATE_CAP]
 
 
+def _shares_discriminative_term(query: str, candidate: PatentCandidate) -> bool:
+    """Overí, či kandidát zdieľa s dotazom aspoň jeden rozlišujúci termín.
+
+    Všeobecné technické slová (method, system, device) spájajú takmer ľubovoľné
+    dva patenty, preto sa do úvahy berú len tokeny, ktoré nesú tému dotazu.
+    """
+    discriminators = discriminative_tokens(query)
+    if not discriminators:
+        return True
+    return bool(discriminators & tokens(f"{candidate.title} {candidate.snippet}"))
+
+
 def _rank(
     query: str,
     candidates: list[PatentCandidate],
@@ -420,16 +448,22 @@ def _rank(
     corpus_idf = build_corpus_idf([f"{c.title} {c.snippet}" for c in candidates])
     for candidate in candidates:
         candidate.score = _score(query, candidate, idf=corpus_idf)
+    # Doménová kotva sa uplatňuje na všetkých kandidátov, nielen v núdzovom
+    # režime. Publikačná vetva takú podmienku má už dlhšie; patentová nie, takže
+    # patent spojený s dotazom len všeobecnou technickou slovnou zásobou mohol
+    # prejsť aj cez hlavný prah. Váženie vzácnosťou termínov to nezachytí, keď
+    # sú všetci kandidáti z jednej patentovej rodiny a majú rovnaké frekvencie.
+    on_topic = [c for c in candidates if _shares_discriminative_term(query, c)]
     primary = [
         candidate
-        for candidate in candidates
+        for candidate in on_topic
         if candidate.score >= MIN_RELEVANCE_SCORE
     ]
     threshold_used = float(MIN_RELEVANCE_SCORE)
     if len(primary) < MIN_RELEVANCE_FALLBACK_NEEDED:
         relaxed = [
             candidate
-            for candidate in candidates
+            for candidate in on_topic
             if candidate.score >= MIN_RELEVANCE_SCORE_FALLBACK
         ]
         if len(relaxed) > len(primary):
@@ -438,10 +472,11 @@ def _rank(
     if primary:
         ranked = primary
     elif allow_low_confidence:
-        # Aj v núdzovom režime sa vracajú len kandidáti s aspoň minimálnym
-        # prekryvom s dotazom. Bez tejto hranice sa do reportu dostávali
-        # patenty so skóre 0, ktoré s dotazom nesúviseli vôbec.
-        ranked = [c for c in candidates if c.score >= MIN_RELEVANCE_FLOOR]
+        # Aj v núdzovom režime musí kandidát prekročiť minimálne skóre a zároveň
+        # zdieľať s dotazom aspoň jeden rozlišujúci termín. Bez druhej podmienky
+        # sa do reportu dostávali patenty, ktoré s dotazom spájala len všeobecná
+        # technická slovná zásoba (method, system, device).
+        ranked = [candidate for candidate in on_topic if candidate.score >= MIN_RELEVANCE_FLOOR]
     else:
         ranked = []
     sorted_ranked = sorted(ranked, key=lambda item: (-item.score, item.patent_number))[:limit]

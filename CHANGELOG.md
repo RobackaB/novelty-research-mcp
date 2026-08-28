@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Every release keeps the 7 MCP tool interfaces (names, parameters, response shape)
 compatible with the exported Flowise architecture.
 
+## [0.9.4] Patent relevance and report visibility
+
+### Fixed
+
+- The domain anchor now applies to every patent ranking path, not just the low-confidence fallback. Term-rarity weighting cannot catch an off-topic result when all candidates belong to one patent family, because every term then has the same document frequency. An image-comparison filing scoring 3.58 against a log-anomaly query is now rejected.
+- A failed or blocked detail fetch no longer erases the search snippet already held, which had made verified-attempt candidates invisible while an unattempted one stayed in the report.
+- The same invention filed under several publication numbers is collapsed to one entry, so a single family can no longer fill the patent section.
+
+### Added
+
+- `docs/example-report.md`, a verbatim report from a real run, linked from the README.
+
 ## [0.9.3] Dependency compatibility
 
 ### Fixed
