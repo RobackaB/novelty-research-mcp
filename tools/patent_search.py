@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import re
-import time
 from dataclasses import asdict, dataclass
 from typing import Any
 from urllib.parse import urljoin
@@ -16,9 +15,10 @@ from urllib.parse import urljoin
 import httpx
 from bs4 import BeautifulSoup
 
+from ._ttl_cache import TTLCache
 from .output_cleaner import USER_AGENT, trim_words
 from .patent_filters import extract_patent_number
-from .relevance import evidence_score
+from .relevance import build_corpus_idf, evidence_score
 from .result_contract import NormalizedResult
 
 LOGGER = logging.getLogger(__name__)
@@ -26,14 +26,25 @@ MAX_RESULTS_CAP = 10
 MIN_RELEVANCE_SCORE = 2.8
 MIN_RELEVANCE_FALLBACK_NEEDED = 3
 MIN_RELEVANCE_SCORE_FALLBACK = 2.2
+MIN_RELEVANCE_FLOOR = 1.5
 PROVIDER_CANDIDATE_CAP = 80
 SEARCH_CANDIDATE_POOL_SIZE = 15
 SEARCH_CACHE_TTL_SECONDS = 300
-_PATENT_SEARCH_CACHE: dict[tuple[str, int], tuple[float, str]] = {}
+_PATENT_SEARCH_CACHE: TTLCache[tuple[str, int], str] = TTLCache(
+    ttl_seconds=SEARCH_CACHE_TTL_SECONDS, max_entries=64
+)
 
 
 class ProviderUnavailable(RuntimeError):
     """Výnimka pre poskytovateľa, ktorý nie je dostupný alebo nie je nakonfigurovaný."""
+
+
+# Provideri, ktorých úspešné dokončenie bez nálezov je spoľahlivý negatívny signál.
+_PRIMARY_PATENT_PROVIDERS = frozenset({"google_patents_xhr", "tavily", "exa"})
+
+# Google hostuje oficiálne PDF patentov na samostatnom storage buckete, ktorý
+# nepodlieha ochrane proti automatizovaným požiadavkam ako patents.google.com.
+PATENT_PDF_BASE_URL = "https://patentimages.storage.googleapis.com/"
 
 
 @dataclass
@@ -44,6 +55,13 @@ class PatentCandidate:
     snippet: str
     score: float = 0.0
     provider: str = ""
+    # Oficiálne PDF patentu na Google storage; na rozdiel od HTML stránky
+    # nepodlieha ochrane proti automatizovaným požiadavkam a obsahuje plný
+    # text nárokov aj opisu vynálezu.
+    pdf_url: str = ""
+    assignee: str = ""
+    filing_date: str = ""
+    grant_date: str = ""
 
 
 def _normalize_query(query: Any) -> str:
@@ -141,15 +159,12 @@ def _phrase_score(query: str, text: str) -> float:
     return min(token_bonus, 1.5)
 
 
-def _score(query: str, candidate: PatentCandidate) -> float:
+def _score(query: str, candidate: PatentCandidate, idf: dict[str, float] | None = None) -> float:
     """Vypočíta celkové interné skóre patentového kandidáta."""
     text = f"{candidate.title} {candidate.snippet}"
-    return round(min(evidence_score(query, text, "PATENT") + _phrase_score(query, text), 10.0), 2)
-
-
-def _matches_required_concept(query: str, candidate: PatentCandidate) -> bool:
-    """Overí, či kandidát spĺňa povinný koncept dotazu."""
-    return True
+    return round(
+        min(evidence_score(query, text, "PATENT", idf=idf) + _phrase_score(query, text), 10.0), 2
+    )
 
 
 def _json_response(result: NormalizedResult, provider: str, candidates: list[PatentCandidate]) -> str:
@@ -173,6 +188,10 @@ def _json_response(result: NormalizedResult, provider: str, candidates: list[Pat
                 "evidence_level": "search_snippet_only",
                 "verified_url": False,
                 "needs_fetch": True,
+                "pdf_url": candidate.pdf_url,
+                "assignee": candidate.assignee,
+                "filing_date": candidate.filing_date,
+                "grant_date": candidate.grant_date,
             }
             for candidate in candidates
         ],
@@ -214,7 +233,12 @@ async def _tavily_patent_search(client: httpx.AsyncClient, query: str, limit: in
             "include_answer": False,
             "include_raw_content": False,
             "max_results": min(max(limit * 4, SEARCH_CANDIDATE_POOL_SIZE), 20),
-            "include_domains": ["patents.google.com", "patentscope.wipo.int"],
+            "include_domains": [
+                "patents.google.com",
+                "patentscope.wipo.int",
+                "patents.justia.com",
+                "worldwide.espacenet.com",
+            ],
         },
     )
     response.raise_for_status()
@@ -241,7 +265,12 @@ async def _exa_patent_search(client: httpx.AsyncClient, query: str, limit: int) 
             "query": _web_patent_query(query),
             "type": "auto",
             "numResults": min(max(limit * 5, SEARCH_CANDIDATE_POOL_SIZE), PROVIDER_CANDIDATE_CAP),
-            "includeDomains": ["patents.google.com", "patentscope.wipo.int"],
+            "includeDomains": [
+                "patents.google.com",
+                "patentscope.wipo.int",
+                "patents.justia.com",
+                "worldwide.espacenet.com",
+            ],
             "contents": {"text": True},
         },
     )
@@ -257,6 +286,52 @@ async def _exa_patent_search(client: httpx.AsyncClient, query: str, limit: int) 
     return _dedupe(candidates)[:PROVIDER_CANDIDATE_CAP]
 
 
+async def _google_patents_xhr_search(client: httpx.AsyncClient, query: str, limit: int) -> list[PatentCandidate]:
+    """Vyhľadá patentových kandidátov cez natívne Google Patents JSON rozhranie.
+
+    Rozhranie nevyžaduje API kľúč, takže patentové vyhľadávanie funguje
+    aj bez nakonfigurovaného Tavily alebo Exa.
+    """
+    response = await client.get(
+        "https://patents.google.com/xhr/query",
+        params={"url": f"q=({query})", "exp": ""},
+        headers={"Referer": "https://patents.google.com/"},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    clusters = ((payload.get("results") or {}).get("cluster")) or []
+    candidates: list[PatentCandidate] = []
+    for cluster in clusters:
+        if not isinstance(cluster, dict):
+            continue
+        for item in cluster.get("result") or []:
+            if not isinstance(item, dict):
+                continue
+            patent = item.get("patent") or {}
+            if not isinstance(patent, dict):
+                continue
+            number = re.sub(r"[^A-Z0-9]", "", _text(patent.get("publication_number")).upper())
+            if not number:
+                continue
+            title = _text(patent.get("title"))
+            snippet = _text(patent.get("snippet") or patent.get("abstract"))
+            pdf_path = _text(patent.get("pdf")).lstrip("/")
+            candidates.append(
+                PatentCandidate(
+                    title=title or number,
+                    url=f"https://patents.google.com/patent/{number}/en",
+                    patent_number=number,
+                    snippet=trim_words(snippet or "No abstract snippet was returned.", 60),
+                    provider="google_patents_xhr",
+                    pdf_url=f"{PATENT_PDF_BASE_URL}{pdf_path}" if pdf_path else "",
+                    assignee=_text(patent.get("assignee")),
+                    filing_date=_text(patent.get("filing_date")),
+                    grant_date=_text(patent.get("grant_date") or patent.get("publication_date")),
+                )
+            )
+    return _dedupe(candidates)[:PROVIDER_CANDIDATE_CAP]
+
+
 def _wipo_publication_number(anchor_text: str, row_text: str, url: str) -> str:
     """Vytiahne publikačné číslo z riadku výsledku WIPO PATENTSCOPE."""
     normalized_anchor = re.sub(r"[^A-Za-z0-9]", "", anchor_text).upper()
@@ -266,6 +341,35 @@ def _wipo_publication_number(anchor_text: str, row_text: str, url: str) -> str:
     if country_match and re.fullmatch(r"\d{6,}", normalized_anchor):
         return f"{country_match.group(1).upper()}{normalized_anchor}"
     return extract_patent_number(anchor_text, row_text, url)
+
+
+_WIPO_CLASSIFICATION_RE = re.compile(
+    r"\bInt\.?\s*Class\b.*?(?=\bAppl\.?\s*No\b|\bApplicant\b|\bInventor\b|$)",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_WIPO_FIELD_RE = re.compile(
+    r"\b(?:Appl\.?\s*No|Applicant|Inventor|Agent|Priority\s*Data|Publication\s*Date)\b\s*:?\s*",
+    flags=re.IGNORECASE,
+)
+_WIPO_ROW_PREFIX_RE = re.compile(r"^\s*\d+\.\s*\d{6,}\s*", flags=re.IGNORECASE)
+
+
+def _wipo_snippet(row_text: str) -> str:
+    """Vytvorí snippet z riadku výsledkov WIPO PATENTSCOPE.
+
+    Riadok tabuľky neobsahuje abstrakt, ale poradové číslo, názov, dátum a
+    najmä celý rozpis medzinárodného patentového triedenia. Ten je zložený zo
+    všeobecných technických slov ("recognising patterns", "computing", "data"),
+    ktoré pri hodnotení relevancie spôsobovali falošné zhody s ľubovoľným
+    technickým dotazom. Klasifikácia a formulárové polia sa preto odstraňujú;
+    ak po očistení nezostane nič vecné, snippet sa nevytvára vôbec.
+    """
+    text = _WIPO_ROW_PREFIX_RE.sub("", str(row_text or ""))
+    text = _WIPO_CLASSIFICATION_RE.sub(" ", text)
+    text = _WIPO_FIELD_RE.sub(" ", text)
+    text = re.sub(r"\b[A-Z]{2}\s*-\s*\d{2}\.\d{2}\.\d{4}\b", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" .;,-")
+    return text if len(text.split()) >= 5 else ""
 
 
 def _wipo_title(anchor_text: str, row_text: str) -> str:
@@ -296,7 +400,9 @@ async def _wipo_patentscope_search(client: httpx.AsyncClient, query: str, limit:
         text = _text(row.get_text(" ", strip=True) if row else anchor.get_text(" ", strip=True))
         source_url = urljoin("https://patentscope.wipo.int/search/en/", href)
         number = _wipo_publication_number(anchor_text, text, source_url)
-        item = _candidate(_wipo_title(anchor_text, text), "", number, text, "wipo_patentscope")
+        item = _candidate(
+            _wipo_title(anchor_text, text), "", number, _wipo_snippet(text), "wipo_patentscope"
+        )
         if item:
             candidates.append(item)
     return _dedupe(candidates)[:PROVIDER_CANDIDATE_CAP]
@@ -309,12 +415,15 @@ def _rank(
     allow_low_confidence: bool = False,
 ) -> tuple[list[PatentCandidate], float]:
     """Ohodnotí kandidátov a vráti najrelevantnejšie výsledky."""
+    # Vzácnosť termínov sa počíta nad celou množinou kandidátov, aby termíny
+    # spoločné pre všetky patenty nezvyšovali skóre tematicky vzdialených.
+    corpus_idf = build_corpus_idf([f"{c.title} {c.snippet}" for c in candidates])
     for candidate in candidates:
-        candidate.score = _score(query, candidate)
+        candidate.score = _score(query, candidate, idf=corpus_idf)
     primary = [
         candidate
         for candidate in candidates
-        if candidate.score >= MIN_RELEVANCE_SCORE and _matches_required_concept(query, candidate)
+        if candidate.score >= MIN_RELEVANCE_SCORE
     ]
     threshold_used = float(MIN_RELEVANCE_SCORE)
     if len(primary) < MIN_RELEVANCE_FALLBACK_NEEDED:
@@ -322,12 +431,19 @@ def _rank(
             candidate
             for candidate in candidates
             if candidate.score >= MIN_RELEVANCE_SCORE_FALLBACK
-            and _matches_required_concept(query, candidate)
         ]
         if len(relaxed) > len(primary):
             primary = relaxed
             threshold_used = float(MIN_RELEVANCE_SCORE_FALLBACK)
-    ranked = primary or (candidates if allow_low_confidence else [])
+    if primary:
+        ranked = primary
+    elif allow_low_confidence:
+        # Aj v núdzovom režime sa vracajú len kandidáti s aspoň minimálnym
+        # prekryvom s dotazom. Bez tejto hranice sa do reportu dostávali
+        # patenty so skóre 0, ktoré s dotazom nesúviseli vôbec.
+        ranked = [c for c in candidates if c.score >= MIN_RELEVANCE_FLOOR]
+    else:
+        ranked = []
     sorted_ranked = sorted(ranked, key=lambda item: (-item.score, item.patent_number))[:limit]
     return sorted_ranked, threshold_used
 
@@ -360,9 +476,9 @@ async def patent_search(query: str, max_results: int = 10) -> str:
     limit = max(1, min(max_results, MAX_RESULTS_CAP))
     cache_key = (normalized_query, limit)
     cached = _PATENT_SEARCH_CACHE.get(cache_key)
-    if cached and time.time() - cached[0] <= SEARCH_CACHE_TTL_SECONDS:
+    if cached is not None:
         LOGGER.info("patent_search cache_hit query=%r max_results=%s", normalized_query[:200], limit)
-        return cached[1]
+        return cached
     errors: list[dict[str, str]] = []
     notes: list[str] = []
     completed_count = 0
@@ -370,6 +486,7 @@ async def patent_search(query: str, max_results: int = 10) -> str:
     unavailable_primary_count = 0
     all_candidates: list[PatentCandidate] = []
     providers = [
+        ("google_patents_xhr", _google_patents_xhr_search),
         ("tavily", _tavily_patent_search),
         ("exa", _exa_patent_search),
         ("wipo_patentscope", _wipo_patentscope_search),
@@ -419,10 +536,10 @@ async def patent_search(query: str, max_results: int = 10) -> str:
             if slot["ok"] > 0:
                 completed_count += 1
                 completed_providers.append(provider_name)
-                if provider_name in {"tavily", "exa"}:
+                if provider_name in _PRIMARY_PATENT_PROVIDERS:
                     primary_completed_count += 1
             elif slot["unavailable"] > 0 and slot["error"] == 0:
-                if provider_name in {"tavily", "exa"}:
+                if provider_name in _PRIMARY_PATENT_PROVIDERS:
                     unavailable_primary_count += 1
                 notes.append(f"{provider_name} not configured for this run.")
 
@@ -463,7 +580,7 @@ async def patent_search(query: str, max_results: int = 10) -> str:
             provider_label if not retrieval_incomplete else "mixed",
             ranked,
         )
-        _PATENT_SEARCH_CACHE[cache_key] = (time.time(), result)
+        _PATENT_SEARCH_CACHE.set(cache_key, result)
         return result
 
     low_confidence_ranked, _ = _rank(normalized_query, deduped_candidates, limit, allow_low_confidence=True)
@@ -481,7 +598,7 @@ async def patent_search(query: str, max_results: int = 10) -> str:
             "mixed",
             low_confidence_ranked,
         )
-        _PATENT_SEARCH_CACHE[cache_key] = (time.time(), result)
+        _PATENT_SEARCH_CACHE.set(cache_key, result)
         return result
 
     if completed_count > 0 and not errors:
@@ -495,15 +612,15 @@ async def patent_search(query: str, max_results: int = 10) -> str:
                 errors=[],
                 notes=notes
                 + [
-                    "Tavily, Exa, and WIPO PATENTSCOPE completed but returned zero high-confidence patent records."
+                    f"Patent providers completed ({', '.join(completed_providers) or 'none'}) but returned zero high-confidence patent records."
                     if reliable_no_results
-                    else "Only WIPO PATENTSCOPE completed; Tavily and Exa were unavailable, so do not treat this as reliable negative patent evidence."
+                    else "No primary patent provider completed; do not treat this as reliable negative patent evidence."
                 ],
             ),
             "mixed",
             [],
         )
-        _PATENT_SEARCH_CACHE[cache_key] = (time.time(), result)
+        _PATENT_SEARCH_CACHE.set(cache_key, result)
         return result
 
     result = _json_response(
@@ -518,5 +635,5 @@ async def patent_search(query: str, max_results: int = 10) -> str:
         "mixed",
         [],
     )
-    _PATENT_SEARCH_CACHE[cache_key] = (time.time(), result)
+    _PATENT_SEARCH_CACHE.set(cache_key, result)
     return result

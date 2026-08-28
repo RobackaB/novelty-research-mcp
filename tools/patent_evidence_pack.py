@@ -13,33 +13,20 @@ from .patent_fetch import patent_fetch
 from .patent_search import patent_search
 from .query_normalize import clean_tool_query
 from .relevance import discriminative_tokens, evidence_score, subject_anchors, tokens
+from .requirement_match import atom_coverage
 from .source_verify import verify_sources
 
 
 _CLAIM_COVERAGE_FOCUSED_THRESHOLD = 0.5
 _VERIFIED_PATENT_EVIDENCE_LEVELS = frozenset({"claim_verified", "abstract_verified", "verified_metadata"})
+_EXACT_CANDIDATE_EVIDENCE_LEVELS = frozenset({"claim_verified", "abstract_verified"})
 
 
 def _compute_claim_coverage(
     claim_text: str, atomic_requirements: list[dict[str, Any]] | None
 ) -> tuple[float, int]:
-    """Vypočíta, koľko častí dotazu je pokrytých textom patentového nároku."""
-    if not atomic_requirements:
-        return 0.0, 0
-    text = (claim_text or "").lower()
-    if not text:
-        return 0.0, 0
-    matched = 0
-    for atom in atomic_requirements:
-        terms = [str(t or "").lower().strip() for t in (atom.get("terms") or [])]
-        terms = [t for t in terms if t]
-        if not terms:
-            continue
-        if all(term in text for term in terms):
-            matched += 1
-    total = len(atomic_requirements)
-    coverage = matched / total if total else 0.0
-    return round(coverage, 4), matched
+    """Vypočíta, koľko častí dotazu je pokrytých textom patentových nárokov."""
+    return atom_coverage(claim_text or "", atomic_requirements)
 
 
 _COMBINATION_PATTERNS = (
@@ -160,6 +147,7 @@ def _fetch_level(fetch_output: str) -> str:
         "ABSTRACT_VERIFIED": "abstract_verified",
         "FETCH_TIMEOUT": "fetch_timeout",
         "FETCH_FAILED": "fetch_failed",
+        "FETCH_BLOCKED": "fetch_failed",
     }.get(raw, "fetch_failed" if "TOOL_ERROR:" in (fetch_output or "") else "search_snippet_only")
 
 
@@ -269,11 +257,11 @@ async def patent_evidence_pack(
         per_fetch_ceiling = max(5000, min(fetch_timeout_ms, 18000))
         outer_ceiling_s = max(6.0, (per_fetch_ceiling * 2) / 1000.0)
 
-        async def _bounded_patent_fetch(url: str) -> str:
+        async def _bounded_patent_fetch(url: str, pdf_url: str) -> str:
             """Načíta detail patentu s dodatočným časovým limitom volania."""
             try:
                 return await asyncio.wait_for(
-                    patent_fetch(url=url, timeout_ms=per_fetch_ceiling),
+                    patent_fetch(url=url, timeout_ms=per_fetch_ceiling, pdf_url=pdf_url),
                     timeout=outer_ceiling_s,
                 )
             except asyncio.TimeoutError:
@@ -287,7 +275,9 @@ async def patent_evidence_pack(
 
         fetched = await asyncio.gather(
             *[
-                _bounded_patent_fetch(str(item.get("url") or ""))
+                _bounded_patent_fetch(
+                    str(item.get("url") or ""), str(item.get("pdf_url") or "")
+                )
                 for item in selected_for_fetch
             ],
             return_exceptions=True,
@@ -324,7 +314,12 @@ async def patent_evidence_pack(
             summary_parts.append(f"Search snippet: {snippet}")
         if fetched_summary:
             summary_parts.append(fetched_summary)
-        if fetch_output and evidence_level in {"fetch_timeout", "fetch_failed"}:
+        if fetch_output and "STATUS: BLOCKED" in fetch_output:
+            warnings.append(
+                f"Patent fetch for {item.get('url')} was blocked by the source's "
+                "anti-automation protection; claim/abstract could not be verified."
+            )
+        elif fetch_output and evidence_level in {"fetch_timeout", "fetch_failed"}:
             warnings.append(f"Patent fetch did not verify {item.get('url')}: {trim_words(fetch_output, 40)}")
         url = _clean_hit_text(item.get("url") or "")
         provider = _clean_hit_text(_field(fetch_output, "PROVIDER") or item.get("provider") or search_payload.get("provider") or "")
@@ -336,8 +331,27 @@ async def patent_evidence_pack(
             url,
         )
         claim1_text = _field(fetch_output, "CLAIM1") if fetch_output else ""
+        claims_text = _field(fetch_output, "CLAIMS_TEXT") if fetch_output else ""
+        abstract_text = _field(fetch_output, "ABSTRACT") if fetch_output else ""
+        description_text = _field(fetch_output, "DESCRIPTION_TEXT") if fetch_output else ""
+        # Tokeny celého oficiálneho PDF (plný text nárokov aj opisu vynálezu).
+        coverage_tokens = _field(fetch_output, "COVERAGE_TOKENS") if fetch_output else ""
+        coverage_parts = [
+            part
+            for part in (claim1_text, claims_text, abstract_text, description_text)
+            if part and "No claim excerpt" not in part and "No first claim" not in part
+            and "No abstract" not in part
+        ]
+        if coverage_tokens:
+            coverage_parts.append(coverage_tokens)
+        coverage_text = " ".join(coverage_parts)
         claim_coverage, claim_atom_match_count = _compute_claim_coverage(
-            claim1_text, atomic_requirements
+            coverage_text, atomic_requirements
+        )
+        exact_candidate = bool(
+            atomic_requirements
+            and claim_coverage >= 1.0
+            and evidence_level in _EXACT_CANDIDATE_EVIDENCE_LEVELS
         )
         hits.append(
             {
@@ -356,6 +370,7 @@ async def patent_evidence_pack(
                 ),
                 "claim_coverage": claim_coverage,
                 "claim_atom_match_count": claim_atom_match_count,
+                "exact_combination_candidate_found": exact_candidate,
                 "relevance_score": evidence_score(
                     relevance_query,
                     f"{norm_title} {summary}",

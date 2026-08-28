@@ -8,6 +8,20 @@ from typing import Any
 
 from .evidence_quality import CONFIDENCES, VERDICTS, decide_verdict_and_confidence, grade_source
 from .final_answer_pack import _parse_pack, _valid_hits
+from .output_cleaner import (
+    collapse_repeats,
+    strip_boilerplate,
+    strip_leading_title,
+    unescape_entities,
+)
+from .relevance import tokens as _relevance_tokens
+from .requirement_match import (
+    blob_tokens as _blob_tokens,
+    part_matches as _part_matches,
+    requirement_match_strength as _requirement_match_strength,
+    stem_requirement_token as _stem_requirement_token,
+    term_matches_blob as _term_matches_blob,
+)
 
 SUMMARY_CHAR_LIMIT = 360      
 TITLE_CHAR_LIMIT = 220
@@ -76,8 +90,10 @@ def _trim_to_words(text: str, limit: int = TOTAL_WORD_LIMIT) -> str:
 def _detect_language(query: str, query_envelope: dict[str, Any] | None = None) -> str:
     """Určí jazyk výstupu podľa wrapperu dotazu alebo znakov v otázke."""
     envelope_language = str((query_envelope or {}).get("language") or "").lower()
-    if envelope_language in {"sk", "en", "mixed"}:
-        return "sk" if envelope_language == "sk" else "en"
+    if envelope_language in {"sk", "non_english"}:
+        return "sk"
+    if envelope_language in {"en", "mixed"}:
+        return "en"
     if re.search(r"[^\x00-\x7f]", query or ""):
         return "sk"
     return "en"
@@ -136,14 +152,22 @@ def _is_mostly_non_ascii(text: str, threshold: float = NON_ASCII_DROP_THRESHOLD)
     return non_ascii / max(1, len(text)) >= threshold
 
 
-def _sanitize_summary(text: Any, limit: int, language: str) -> str:
+def _sanitize_display_text(text: Any, limit: int) -> str:
+    """Očistí text určený na zobrazenie od entít a zdvojených výrazov."""
+    return _sanitize_text(collapse_repeats(unescape_entities(text)), limit)
+
+
+def _sanitize_summary(text: Any, limit: int, language: str, title: Any = "") -> str:
     """Očistí zhrnutie nálezu pred vložením do odpovede pre používateľa."""
     raw_initial = str(text or "")
     if _TABLE_PIPE_RE.search(raw_initial):
         return ""
     if language != "sk" and _is_mostly_non_ascii(raw_initial):
         return ""
-    return _sanitize_text(raw_initial, limit)
+    cleaned = strip_boilerplate(collapse_repeats(unescape_entities(raw_initial)))
+    if title:
+        cleaned = strip_leading_title(cleaned, collapse_repeats(unescape_entities(title)))
+    return _sanitize_text(cleaned, limit)
 
 
 def _conclusion_phrase(verdict: str, language: str) -> str:
@@ -232,6 +256,10 @@ def _section_labels(language: str) -> dict[str, str]:
             "innov_adjacent": "Existuje priestor pre inováciu kombináciou prvkov, ktoré sa nevyskytujú spolu v existujúcom prior art.",
             "innov_no_prior_art": "V rozsahu vykonaného vyhľadávania je priestor pre inováciu otvorený; pred patentovaním však odporúčame manuálnu rešerš.",
             "no_sources": "Žiadne URL adresy neboli získané v tomto prieskume.",
+            "coverage_requirements_word": "požiadaviek plne overených",
+            "coverage_meta_label": "pokrytie prvkov",
+            "corroboration_label": "Nezávislé potvrdenie",
+            "corroborated_marker": "potvrdené viacerými zdrojmi",
         }
     return {
         "summary": "## Summary",
@@ -282,6 +310,10 @@ def _section_labels(language: str) -> dict[str, str]:
         "innov_adjacent": "Space for innovation exists in combinations of elements that do not co-occur in the existing prior art.",
         "innov_no_prior_art": "Within this search scope, the space for innovation appears open; manual prior-art search is still recommended before filing.",
         "no_sources": "No URLs were retrieved in this search.",
+        "coverage_requirements_word": "requirements fully verified",
+        "coverage_meta_label": "element coverage",
+        "corroboration_label": "Cross-source corroboration",
+        "corroborated_marker": "corroborated across sources",
     }
 
 
@@ -302,17 +334,32 @@ def _novelty_score(verdict: str, confidence: str, retrieval: str) -> tuple[int |
     return score, "ok"
 
 
+def _summary_carries_evidence(summary: str, query_tokens: set[str] | None) -> bool:
+    """Overí, či súhrn nesie aspoň nejaký obsah súvisiaci s dotazom.
+
+    Po očistení navigačného balastu môže zo stránky zostať text, ktorý síce
+    vyzerá čitateľne, ale s dotazom nemá nič spoločné. Taký súhrn je v reporte
+    horší než žiadny — pri náleze sa potom zobrazia iba overiteľné údaje.
+    """
+    if not query_tokens:
+        return True
+    return bool(_relevance_tokens(summary) & query_tokens)
+
+
 def _render_hit_block(
     index: int,
     hit: dict[str, Any],
     labels: dict[str, str],
     language: str,
+    query_tokens: set[str] | None = None,
 ) -> list[str]:
     """Pripraví jeden nález ako krátky blok do výslednej odpovede."""
-    title = _sanitize_text(hit.get("title"), TITLE_CHAR_LIMIT) or f"Hit {index}"
+    title = _sanitize_display_text(hit.get("title"), TITLE_CHAR_LIMIT) or f"Hit {index}"
     url = _sanitize_text(hit.get("url"), URL_CHAR_LIMIT)
     patent_number = _sanitize_text(hit.get("patent_number"), 60)
-    summary = _sanitize_summary(hit.get("summary"), SUMMARY_CHAR_LIMIT, language)
+    summary = _sanitize_summary(hit.get("summary"), SUMMARY_CHAR_LIMIT, language, title=title)
+    if summary and not _summary_carries_evidence(summary, query_tokens):
+        summary = ""
     evidence = _sanitize_text(hit.get("evidence_level"), 60)
     verified = hit.get("verified_url")
     relevance_raw = _sanitize_text(hit.get("relevance"), 60).lower()
@@ -338,6 +385,13 @@ def _render_hit_block(
         meta_bits.append(f"`{labels['verified_url_no']}`")
     if relevance_raw:
         meta_bits.append(f"{labels['relevance_label']}: `{relevance_raw}`")
+    coverage_raw = hit.get("claim_coverage")
+    if not isinstance(coverage_raw, (int, float)) or coverage_raw <= 0:
+        coverage_raw = hit.get("atom_coverage")
+    if isinstance(coverage_raw, (int, float)) and coverage_raw > 0:
+        meta_bits.append(f"{labels['coverage_meta_label']}: {round(float(coverage_raw) * 100)}%")
+    if hit.get("cross_source_corroborated") is True:
+        meta_bits.append(f"`{labels['corroborated_marker']}`")
     if meta_bits:
         block.append("   _" + " · ".join(meta_bits) + "_")
     return block
@@ -388,6 +442,7 @@ def _render_source_subsection(
     hits: list[dict[str, Any]],
     labels: dict[str, str],
     language: str,
+    query_tokens: set[str] | None = None,
 ) -> list[str]:
     """Pripraví sekciu jedného typu zdroja s priamymi a slabšími nálezmi."""
     lines = [header]
@@ -410,13 +465,13 @@ def _render_source_subsection(
         if weak_leads:
             lines.append(f"**{labels['direct_label']}**")
         for index, hit in enumerate(direct, start=1):
-            lines.extend(_render_hit_block(index, hit, labels, language))
+            lines.extend(_render_hit_block(index, hit, labels, language, query_tokens))
             lines.append("")
     if weak_leads:
         if direct:
             lines.append(f"**{labels['weak_leads_label']}**")
         for index, hit in enumerate(weak_leads, start=len(direct) + 1):
-            lines.extend(_render_hit_block(index, hit, labels, language))
+            lines.extend(_render_hit_block(index, hit, labels, language, query_tokens))
             lines.append("")
     if lines and lines[-1] == "":
         lines.pop()
@@ -445,6 +500,7 @@ def _render_summary_section(
     language: str,
     labels: dict[str, str],
     exact_combination_found: bool = False,
+    corroborated_documents: list[str] | None = None,
 ) -> list[str]:
     """Vytvorí úvodné zhrnutie výsledku prieskumu."""
     grade_text = ", ".join(
@@ -457,6 +513,9 @@ def _render_summary_section(
         _conclusion_phrase(verdict, language),
         f"**{labels['quality_label']}:** {grade_text}.",
     ]
+    if corroborated_documents:
+        shown = "; ".join(corroborated_documents[:4])
+        out.append(f"**{labels['corroboration_label']}:** {shown}.")
     if not exact_combination_found and verdict != "no_reliable_prior_art":
         if language == "sk":
             out.append(
@@ -641,19 +700,11 @@ def _render_uncertainty_section(
 
     if critical_requirements:
         lines.append(f"**{labels['coverage_label']}:**")
-        verified_label = labels.get("verified_disclosure_by", "verified disclosure by")
-        not_verified_label = labels.get(
-            "not_verified", "not verified by any source (search snippets at most)"
-        )
-        for index, req in enumerate(critical_requirements, start=1):
-            req_clean = _sanitize_text(req, 200)
-            covering = [
-                source for source, count in requirement_coverage.items() if count >= index
-            ]
-            if covering:
-                lines.append(f"- {req_clean} - {verified_label}: {', '.join(covering)}")
-            else:
-                lines.append(f"- {req_clean} - {not_verified_label}")
+        total = len(critical_requirements)
+        coverage_word = labels.get("coverage_requirements_word", "requirements fully verified")
+        for source in ("patent", "publication", "web"):
+            covered = max(0, min(int(requirement_coverage.get(source, 0) or 0), total))
+            lines.append(f"- {source}: {covered}/{total} {coverage_word}")
     else:
         lines.append(f"- {labels['no_critical_reqs']}")
     return lines
@@ -671,6 +722,7 @@ def _render_user_answer(
     requirement_coverage: dict[str, int] | None = None,
     atomic_requirements: list[dict[str, Any]] | None = None,
     retrieval_status_notes: list[str] | None = None,
+    corroborated_documents: list[str] | None = None,
 ) -> str:
     """Vytvorí kompletnú odpoveď pre používateľa zo zlúčeného wrapperu dôkazov."""
     labels = _section_labels(language)
@@ -696,6 +748,7 @@ def _render_user_answer(
         _render_summary_section(
             verdict, confidence, retrieval, source_grades, language, labels,
             exact_combination_found=exact_combination_found,
+            corroborated_documents=corroborated_documents,
         )
     )
 
@@ -709,14 +762,23 @@ def _render_user_answer(
         if len(notes_section) > 1:
             sections.append(notes_section)
 
+    # Tokeny dotazu slúžia na vyradenie súhrnov, ktoré po očistení balastu
+    # už s dotazom nesúvisia (typicky zvyšky navigácie webovej stránky).
+    query_tokens = _relevance_tokens(query)
     state_of_art = [labels["state_of_art"]]
-    state_of_art.extend(_render_source_subsection(labels["patents"], patents, patent_hits, labels, language))
-    state_of_art.append("")
     state_of_art.extend(
-        _render_source_subsection(labels["publications"], publications, publication_hits, labels, language)
+        _render_source_subsection(labels["patents"], patents, patent_hits, labels, language, query_tokens)
     )
     state_of_art.append("")
-    state_of_art.extend(_render_source_subsection(labels["web"], web, web_hits, labels, language))
+    state_of_art.extend(
+        _render_source_subsection(
+            labels["publications"], publications, publication_hits, labels, language, query_tokens
+        )
+    )
+    state_of_art.append("")
+    state_of_art.extend(
+        _render_source_subsection(labels["web"], web, web_hits, labels, language, query_tokens)
+    )
     sections.append(state_of_art)
 
     sections.append(
@@ -779,94 +841,6 @@ def _hit_text_blob(hit: dict[str, Any]) -> str:
         str(hit.get("snippet") or ""),
     ]
     return " ".join(parts).lower()
-
-def _stem_requirement_token(token: str) -> str:
-    """Upraví token požiadavky do tvaru vhodného na porovnávanie."""
-    token = token.lower().strip()
-    normalization = {
-        "verification": "verify",
-        "verified": "verify",
-        "verifies": "verify",
-        "verifying": "verify",
-        "authentication": "authenticate",
-        "authenticated": "authenticate",
-        "authenticates": "authenticate",
-        "authenticating": "authenticate",
-        "authorization": "authorize",
-        "authorized": "authorize",
-        "authorizes": "authorize",
-        "authorizing": "authorize",
-        "locking": "lock",
-        "locked": "lock",
-        "locks": "lock",
-        "unlocking": "unlock",
-        "unlocked": "unlock",
-        "unlocks": "unlock",
-        "logging": "log",
-        "logged": "log",
-        "logs": "log",
-        "scheduled": "schedule",
-        "scheduling": "schedule",
-    }
-    if token in normalization:
-        return normalization[token]
-    if len(token) <= 3:
-        return token
-    for suffix, replacement in (
-        ("ies", "y"),
-        ("sses", "ss"),
-        ("xes", "x"),
-        ("ches", "ch"),
-        ("shes", "sh"),
-        ("es", ""),
-        ("s", ""),
-    ):
-        if token.endswith(suffix) and len(token) - len(suffix) >= 3:
-            return token[: -len(suffix)] + replacement
-    return token
-
-
-def _blob_tokens(text: str) -> set[str]:
-    """Vytvorí množinu tokenov a ich normalizovaných tvarov z textu."""
-    tokens = re.findall(r"[a-z0-9]+", (text or "").lower())
-    out: set[str] = set()
-    for token in tokens:
-        out.add(token)
-        out.add(_stem_requirement_token(token))
-    return out
-
-
-def _part_matches(part: str, tokens: set[str]) -> bool:
-    """Overí, či sa jedna časť požiadavky zhoduje s tokenmi v texte."""
-    part = part.lower().strip()
-    if not part:
-        return False
-    return part in tokens or _stem_requirement_token(part) in tokens
-
-
-def _term_matches_blob(term: str, tokens: set[str], compact_blob: str) -> bool:
-    """Overí, či sa výraz požiadavky zhoduje s textovým blokom nálezu."""
-    parts = re.findall(r"[a-z0-9]+", str(term or "").lower())
-    if not parts:
-        return False
-    joined = "".join(parts)
-    if len(parts) > 1:
-        return joined in compact_blob or all(_part_matches(part, tokens) for part in parts)
-    return _part_matches(parts[0], tokens)
-
-def _requirement_match_strength(terms: list[str], text: str) -> str:
-    """Určí, či text pokrýva požiadavku úplne, čiastočne alebo vôbec."""
-    cleaned_terms = [str(term).lower().strip() for term in terms if str(term).strip()]
-    if not cleaned_terms:
-        return "none"
-    tokens = _blob_tokens(text)
-    compact_blob = re.sub(r"[^a-z0-9]+", "", (text or "").lower())
-    matched = sum(1 for term in cleaned_terms if _term_matches_blob(term, tokens, compact_blob))
-    if matched == len(cleaned_terms):
-        return "full"
-    if matched:
-        return "partial"
-    return "none"
 
 def _requirement_keyword_sets(
     critical_requirements: list[str],
@@ -1023,6 +997,90 @@ def _per_requirement_status(
         )
     return rows
 
+_PATENT_KIND_SUFFIX_RE = re.compile(r"([A-Z]{2}\d{4,})[A-Z]\d?$")
+_GOOGLE_PATENT_URL_ID_RE = re.compile(r"patents\.google\.com/patent/([a-z0-9]+)", re.IGNORECASE)
+
+
+def _hit_doc_ids(hit: dict[str, Any]) -> set[str]:
+    """Vytvorí kanonické identifikátory dokumentu pre porovnanie naprieč zdrojmi."""
+    ids: set[str] = set()
+    patent_number = str(hit.get("patent_number") or "").upper().strip()
+    if patent_number and patent_number != "UNKNOWN":
+        ids.add("pn:" + _PATENT_KIND_SUFFIX_RE.sub(r"\1", patent_number))
+    doi = str(hit.get("doi") or "").lower().strip().rstrip(".,;")
+    if doi:
+        ids.add("doi:" + doi)
+    url = str(hit.get("url") or "").lower().strip().rstrip("/")
+    if url:
+        url_match = _GOOGLE_PATENT_URL_ID_RE.search(url)
+        if url_match:
+            ids.add("pn:" + _PATENT_KIND_SUFFIX_RE.sub(r"\1", url_match.group(1).upper()))
+        else:
+            ids.add("url:" + url)
+    return ids
+
+
+def _mark_cross_source_corroboration(pack: dict[str, Any]) -> list[str]:
+    """Nájde dokumenty potvrdené viacerými typmi zdrojov a označí príslušné nálezy.
+
+    Vracia zoznam čitateľných popisov korohorovaných dokumentov; zároveň
+    priamo v packu nastaví nálezom príznak `cross_source_corroborated`.
+    """
+    sources = (("patent", "patents"), ("publication", "publications"), ("web", "web"))
+    id_to_sources: dict[str, set[str]] = {}
+    id_display: dict[str, str] = {}
+    per_source_hits: dict[str, list[Any]] = {}
+    for source_name, source_key in sources:
+        hits = _as_list(_as_dict(pack.get(source_key)).get("hits"))
+        per_source_hits[source_name] = hits
+        for hit in hits:
+            if not isinstance(hit, dict):
+                continue
+            for doc_id in _hit_doc_ids(hit):
+                id_to_sources.setdefault(doc_id, set()).add(source_name)
+                if doc_id not in id_display:
+                    display = str(
+                        hit.get("patent_number") or hit.get("doi") or hit.get("title") or hit.get("url") or ""
+                    ).strip()
+                    id_display[doc_id] = display[:120]
+    corroborated_ids = {doc_id for doc_id, names in id_to_sources.items() if len(names) >= 2}
+    if not corroborated_ids:
+        return []
+    for hits in per_source_hits.values():
+        for hit in hits:
+            if isinstance(hit, dict) and _hit_doc_ids(hit) & corroborated_ids:
+                hit["cross_source_corroborated"] = True
+    labels: list[str] = []
+    seen_display: set[str] = set()
+    for doc_id in sorted(corroborated_ids):
+        display = id_display.get(doc_id) or doc_id
+        if display.lower() in seen_display:
+            continue
+        seen_display.add(display.lower())
+        source_names = ", ".join(sorted(id_to_sources[doc_id]))
+        labels.append(f"{display} ({source_names})")
+    return labels
+
+
+def _pseudo_atoms_from_requirements(
+    critical_requirements: list[str],
+) -> list[dict[str, Any]]:
+    """Vytvorí zobrazovacie atómy z textových kritických požiadaviek bez atomického rozkladu."""
+    pseudo: list[dict[str, Any]] = []
+    for requirement in critical_requirements or []:
+        keyword_sets = _requirement_keyword_sets([str(requirement)], None)
+        if not keyword_sets:
+            continue
+        pseudo.append(
+            {
+                "category": "",
+                "label": str(requirement),
+                "terms": keyword_sets[0],
+            }
+        )
+    return pseudo
+
+
 def build_user_answer_payload(
     merged_pack: Any,
     original_query: str = "",
@@ -1034,6 +1092,7 @@ def build_user_answer_payload(
     """Vytvorí štruktúrovaný výstup s odpoveďou pre používateľa."""
     pack = _parse_pack(merged_pack)
     query = str(original_query or pack.get("query") or "")
+    corroborated_documents = _mark_cross_source_corroboration(pack)
     source_grades = _source_grades(pack)
     envelope = _as_dict(query_envelope)
     critical_requirements = [
@@ -1068,8 +1127,13 @@ def build_user_answer_payload(
         and confidence == "high"
     ):
         confidence = "medium"
+    display_atomic_requirements = atomic_requirements or _pseudo_atoms_from_requirements(
+        critical_requirements
+    )
     per_requirement_status = (
-        _per_requirement_status(pack, atomic_requirements) if atomic_requirements else []
+        _per_requirement_status(pack, display_atomic_requirements)
+        if display_atomic_requirements
+        else []
     )
     language = _detect_language(query, query_envelope)
     source_counts = _source_counts(pack)
@@ -1083,8 +1147,9 @@ def build_user_answer_payload(
         language,
         critical_requirements=critical_requirements,
         requirement_coverage=requirement_coverage,
-        atomic_requirements=atomic_requirements,
+        atomic_requirements=display_atomic_requirements,
         retrieval_status_notes=retrieval_status_notes or [],
+        corroborated_documents=corroborated_documents,
     )
     novelty, _ = _novelty_score(verdict, confidence, retrieval)
     has_exact_candidate = any(
@@ -1112,6 +1177,7 @@ def build_user_answer_payload(
         "requirement_coverage_by_source": requirement_coverage,
         "critical_requirement_statuses": per_requirement_status,
         "single_source_contains_all_critical_elements": single_hit_full_coverage or has_exact_candidate,
+        "corroborated_documents": corroborated_documents,
     }
     if debug_mode:
         payload["debug_report"] = debug_report

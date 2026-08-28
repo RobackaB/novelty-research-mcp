@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-from playwright.async_api import async_playwright
-
 from .output_cleaner import USER_AGENT
+
+try:
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+except ImportError:  # Playwright je voliteľný; fallback trieda drží rovnaké rozhranie.
+    class PlaywrightTimeoutError(Exception):
+        """Náhradná výnimka, keď Playwright nie je nainštalovaný."""
 
 
 async def fetch_page_html_and_text(
@@ -15,6 +18,14 @@ async def fetch_page_html_and_text(
     settle_ms: int = 0,
 ) -> tuple[str, str]:
     """Načíta stránku v prehliadači bez grafického rozhrania a vráti jej HTML aj text."""
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "Playwright is not installed; Chromium-based fetching is unavailable. "
+            "Install the 'playwright' package and run 'playwright install chromium'."
+        ) from exc
+
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(
             headless=True,

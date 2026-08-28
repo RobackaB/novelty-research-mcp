@@ -10,10 +10,13 @@ from typing import Iterable
 
 
 TOOLS = [
-    "patent_evidence_pack",
-    "publication_evidence_pack",
-    "web_evidence_pack",
-    "merge_evidence_pack",
+    "research_session_start",
+    "research_session_understand_query",
+    "patent_evidence_to_session",
+    "publication_evidence_to_session",
+    "web_evidence_to_session",
+    "research_session_checklist",
+    "research_session_user_answer",
 ]
 KEYS = [
     ("GOOGLE_CSE_API_KEY", "primárny web_search backend"),
@@ -21,6 +24,8 @@ KEYS = [
     ("TAVILY_API_KEY", "fallback pre web/patent vyhľadávanie"),
     ("EXA_API_KEY", "fallback pre web/patent vyhľadávanie"),
     ("SEMANTIC_SCHOLAR_API_KEY", "vyššie limity pre publikácie"),
+    ("PUBMED_API_KEY", "vyššie limity pre PubMed"),
+    ("ALPHAXIV_API_KEY", "doplnkové publikácie cez AlphaXiv MCP"),
 ]
 
 

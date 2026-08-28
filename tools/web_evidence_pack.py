@@ -7,14 +7,20 @@ import json
 import re
 from dataclasses import dataclass
 
+from typing import Any
+
 from ._hit_sort import sort_hits_by_relevance
 from .output_cleaner import trim_words
 from .patent_filters import extract_patent_number
+from .pdf_fetch import pdf_fetch_text
 from .query_normalize import clean_tool_query
 from .relevance import evidence_score, subject_anchors
+from .requirement_match import atom_coverage, unique_coverage_tokens
 from .result_contract import parse_error_count, parse_reliable_no_results_marker, parse_status_marker
 from .source_verify import verify_sources
-from .web_search import web_fetch, web_search
+from .web_search import _compact_content, web_fetch, web_search
+
+_ATOM_COVERAGE_DIRECT_THRESHOLD = 0.5
 
 _PATENT_LIKE_DOMAINS = (
     "freepatentsonline.com",
@@ -100,7 +106,8 @@ def _parse_candidates(search_output: str) -> tuple[list[WebCandidate], list[str]
         patent_number = ""
         if _is_patent_like_url(url):
             canonical_url, patent_number = _normalize_patent_like_url(url, title_str, snippet_str)
-        if no_fetch and not (snippet_str or title_str):
+        has_real_title = bool(title_str) and title_str != "Untitled result"
+        if no_fetch and not (snippet_str or has_real_title):
             skipped_unsupported.append(url)
             continue
         candidates.append(
@@ -116,9 +123,36 @@ def _parse_candidates(search_output: str) -> tuple[list[WebCandidate], list[str]
     candidates.sort(key=lambda item: item.score, reverse=True)
     return candidates, skipped_unsupported
 
-async def _noop_fetch() -> str:
-    """Vytvorí výsledok pre kandidátov, ktorých obsah sa zámerne nenačítava, napríklad PDF."""
-    return "SKIPPED: non-text evidence format is kept as snippet-backed evidence only."
+_PDF_SKIPPED_OUTPUT = "SKIPPED: non-text evidence format is kept as snippet-backed evidence only."
+
+
+async def _pdf_fetch_output(url: str, timeout_ms: int, query: str) -> str:
+    """Stiahne PDF dokument a vráti výstup v rovnakom formáte ako web_fetch.
+
+    Ak sa text nepodarí extrahovať, dokument zostáva snippet-backed dôkazom
+    ako v pôvodnom správaní.
+    """
+    timeout_s = max(8.0, min((timeout_ms or 14000) / 1000 * 2, 30.0))
+    text = await pdf_fetch_text(url, timeout_s=timeout_s)
+    if not text:
+        return _PDF_SKIPPED_OUTPUT
+    compact = _compact_content(text, query=query)
+    if not compact:
+        return _PDF_SKIPPED_OUTPUT
+    analysis = _compact_content(text, query=query, max_words=900, max_sentences=24)
+    lines = [
+        f"SOURCE_URL: {url} was the PDF document requested.",
+        "DATE: Unknown was the best date found.",
+        f"CONTENT: {compact}",
+        "STATUS: PDF_TEXT",
+        "EVIDENCE_LEVEL: FULLTEXT_VERIFIED",
+    ]
+    if analysis and analysis != compact:
+        lines.append(f"ANALYSIS: {analysis}")
+    token_line = unique_coverage_tokens(text)
+    if token_line:
+        lines.append(f"COVERAGE_TOKENS: {token_line}")
+    return "\n".join(lines)
 
 def _fetch_succeeded(fetch_output: str) -> bool:
     """Zistí, či načítanie stránky prinieslo overený fulltextový obsah."""
@@ -250,6 +284,22 @@ def _extract_fetch_excerpt(fetch_output: str) -> str:
     return trim_words(match.group(1), 80) if match else ""
 
 
+_ANALYSIS_RE = re.compile(r"^ANALYSIS:\s*(.*)$", flags=re.M)
+_COVERAGE_TOKENS_RE = re.compile(r"^COVERAGE_TOKENS:\s*(.*)$", flags=re.M)
+
+
+def _extract_analysis_text(fetch_output: str) -> str:
+    """Vytiahne rozšírený analytický text z výstupu fetch nástroja."""
+    match = _ANALYSIS_RE.search(fetch_output or "")
+    return match.group(1).strip() if match else ""
+
+
+def _extract_coverage_tokens(fetch_output: str) -> str:
+    """Vytiahne tokeny celej stránky určené na výpočet pokrytia prvkov."""
+    match = _COVERAGE_TOKENS_RE.search(fetch_output or "")
+    return match.group(1).strip() if match else ""
+
+
 def _verification_map(verification: str) -> dict[str, bool]:
     """Prevedie výsledok overenia URL adries na slovník dostupnosti."""
     out: dict[str, bool] = {}
@@ -257,6 +307,14 @@ def _verification_map(verification: str) -> dict[str, bool]:
     for url, status in pattern.findall(verification or ""):
         out[url.rstrip(".,;")] = status.upper() == "ALIVE"
     return out
+
+
+def _errors_from_markers(search_output: str) -> list[dict[str, str]]:
+    """Získa štruktúrované chyby zo stavových markerov webového vyhľadávania."""
+    errors = []
+    for error_type, message in re.findall(r"^ERROR:\s*([^-]+?)\s*-\s*(.*?)$", search_output or "", flags=re.I | re.M):
+        errors.append({"type": error_type.strip(), "message": trim_words(message.strip(), 40)})
+    return errors
 
 def _status(search_output: str, hits: list[dict], warnings: list[str], errors: list[str]) -> str:
     """Určí výsledný stav webového evidence packu."""
@@ -273,6 +331,7 @@ async def web_evidence_pack(
     max_fetches: int = 5,
     timeout_ms: int = 14000,
     english_query: str = "",
+    atomic_requirements: list[dict[str, Any]] | None = None,
 ) -> str:
     """Vyhľadá a spracuje webové dôkazy pre zadaný dotaz."""
     warnings: list[str] = []
@@ -306,7 +365,7 @@ async def web_evidence_pack(
         selected = candidates[: max(0, min(max_fetches, 8))]
         fetch_outputs = await asyncio.gather(
             *[
-                _noop_fetch() if item.no_fetch
+                _pdf_fetch_output(item.url, timeout_ms, search_query) if item.no_fetch
                 else web_fetch(url=item.url, timeout_ms=timeout_ms, query=search_query)
                 for item in selected
             ],
@@ -315,10 +374,10 @@ async def web_evidence_pack(
 
         for candidate, fetched in zip(selected, fetch_outputs):
             fetched_text = str(fetched) if not isinstance(fetched, Exception) else f"TOOL_ERROR: web_fetch\nREASON: {fetched}"
-            fetch_ok = (not candidate.no_fetch) and _fetch_succeeded(fetched_text)
-            if candidate.no_fetch:
+            fetch_ok = _fetch_succeeded(fetched_text)
+            if candidate.no_fetch and not fetch_ok:
                 warnings.append(
-                    f"Non-text evidence URL {candidate.url} kept as snippet-backed evidence only; file format is not fetched."
+                    f"Non-text evidence URL {candidate.url} kept as snippet-backed evidence only; document text was not extracted."
                 )
             elif not fetch_ok:
                 warnings.append(f"Fetch failed for {candidate.url}: {trim_words(fetched_text, 40)}")
@@ -363,6 +422,22 @@ async def web_evidence_pack(
             if candidate.patent_number:
                 hit_record["patent_number"] = candidate.patent_number
                 hit_record["is_patent_like"] = True
+            if atomic_requirements:
+                analysis_text = _extract_analysis_text(fetched_text) if fetch_ok else ""
+                coverage_tokens = _extract_coverage_tokens(fetched_text) if fetch_ok else ""
+                coverage_blob = " ".join(
+                    part
+                    for part in (candidate.title, candidate.snippet, excerpt, analysis_text, coverage_tokens)
+                    if part
+                )
+                coverage, matched = atom_coverage(coverage_blob, atomic_requirements)
+                hit_record["atom_coverage"] = coverage
+                hit_record["atom_match_count"] = matched
+                if excerpt_backed and coverage >= _ATOM_COVERAGE_DIRECT_THRESHOLD:
+                    hit_record["relevance"] = "direct"
+                hit_record["exact_combination_candidate_found"] = bool(
+                    excerpt_backed and coverage >= 1.0
+                )
             hits.append(hit_record)
 
         verification = await verify_sources([hit["url"] for hit in hits], max_urls=len(hits)) if hits else ""
@@ -380,10 +455,15 @@ async def web_evidence_pack(
             "reliable_no_results": bool(reliable_no_results) if reliable_no_results is not None else False,
             "hits": hits,
             "warnings": warnings,
-            "errors": errors,
+            "errors": errors or _errors_from_markers(search_output),
         }
-        if parse_error_count(search_output):
+        if parse_error_count(search_output) and not payload["errors"]:
             payload["warnings"].append("Search provider reported partial errors; see server logs or raw web_search output.")
+        elif payload["errors"]:
+            payload["warnings"].append(
+                "Search provider errors: "
+                + "; ".join(f"{err['type']}: {err['message']}" for err in payload["errors"][:3])
+            )
         return json.dumps(payload, ensure_ascii=False, indent=2)
     except Exception as exc:
         return json.dumps(

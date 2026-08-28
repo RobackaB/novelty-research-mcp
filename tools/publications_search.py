@@ -6,14 +6,14 @@ import asyncio
 import json
 import os
 import re
-import shutil
 from typing import Any
 
 import httpx
 
+from .alphaxiv_client import discover_papers as alphaxiv_discover_papers
 from .arxiv_search import arxiv_search
 from .output_cleaner import USER_AGENT, clean_output, format_error, trim_words
-from .relevance import evidence_score, is_relevant
+from .relevance import _MIN_CORPUS_FOR_IDF, build_corpus_idf, evidence_score, is_relevant, tokens
 from .result_contract import NormalizedResult, prepend_markers
 from .search_bounds import section_query_variants
 
@@ -21,12 +21,44 @@ FAILURE_TERMS = ("tool_error:", "429", "rate limit", "too many requests", "timed
 PUBLICATION_CANDIDATE_POOL_SIZE = 15
 MIN_PUBLICATION_RERANK_SCORE = 3.5
 ABSTRACT_WORD_LIMIT = 60
-ALPHA_CLI_TIMEOUT_S = 30.0
 QUERY_FILLER_RE = re.compile(
     r"\b(?:does|do|a|an|the|for|of|to|is|are|in|on|by|with|as|at|or|and|"
     r"je|su|sú|sa|na|do|vo|ako|the|that|this)\b",
     flags=re.I,
 )
+
+
+def _relevant_abstract_excerpt(abstract: str, query: str, max_words: int = ABSTRACT_WORD_LIMIT) -> str:
+    """Vyberie z abstraktu vety najrelevantnejšie k dotazu namiesto jeho začiatku."""
+    text = re.sub(r"\s+", " ", abstract or "").strip()
+    if not text:
+        return ""
+    if len(text.split()) <= max_words:
+        return text
+    query_tokens = tokens(query)
+    sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", text) if sentence.strip()]
+    if not query_tokens or len(sentences) <= 1:
+        return trim_words(text, max_words)
+    scored: list[tuple[int, int]] = []
+    for index, sentence in enumerate(sentences):
+        overlap = len(query_tokens & tokens(sentence))
+        if overlap:
+            scored.append((overlap, index))
+    if not scored:
+        return trim_words(text, max_words)
+    scored.sort(key=lambda row: (-row[0], row[1]))
+    chosen: set[int] = set()
+    used_words = 0
+    for _overlap, index in scored:
+        sentence_words = len(sentences[index].split())
+        if chosen and used_words + sentence_words > max_words:
+            continue
+        chosen.add(index)
+        used_words += sentence_words
+        if used_words >= max_words:
+            break
+    excerpt = " ".join(sentences[index] for index in sorted(chosen))
+    return trim_words(excerpt, max_words)
 
 
 def _publication_failure(reason: str) -> str:
@@ -100,42 +132,6 @@ def _fallback_publication_queries(query: str, max_variants: int = 2) -> list[str
     return variants[:max(1, max_variants)]
 
 
-def _alpha_executable() -> str:
-    """Nájde cestu k AlphaXiv CLI nástroju, ak je dostupný."""
-    configured = os.getenv("ALPHA_CLI_PATH", "").strip()
-    if configured:
-        return configured
-    found = shutil.which("alpha")
-    return found or ""
-
-
-async def _run_alpha_command(query: str, mode: str = "semantic") -> str:
-    """Spustí AlphaXiv CLI vyhľadávanie a vráti jeho textový výstup."""
-    executable = _alpha_executable()
-    if not executable:
-        return ""
-    process = await asyncio.create_subprocess_exec(
-        executable,
-        "search",
-        "--mode",
-        mode,
-        query,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=ALPHA_CLI_TIMEOUT_S)
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.communicate()
-        return ""
-    output = stdout.decode("utf-8", errors="replace").strip()
-    error = stderr.decode("utf-8", errors="replace").strip()
-    if process.returncode != 0:
-        return ""
-    return output or error
-
-
 def _iter_alpha_items(value: object) -> list[dict[str, object]]:
     """Nájde položky publikácií v rôznych tvaroch AlphaXiv výstupu."""
     if isinstance(value, list):
@@ -145,7 +141,7 @@ def _iter_alpha_items(value: object) -> list[dict[str, object]]:
         return items
     if not isinstance(value, dict):
         return []
-    for key in ("papers", "results", "data", "items"):
+    for key in ("result", "papers", "results", "data", "items"):
         nested = value.get(key)
         if isinstance(nested, (list, dict)):
             return _iter_alpha_items(nested)
@@ -161,7 +157,9 @@ def _alpha_url(item: dict[str, object]) -> str:
         value = item.get(key)
         if isinstance(value, str) and value.startswith("http"):
             return value
-    arxiv_id = str(item.get("arxivId") or item.get("arxiv_id") or item.get("id") or "").strip()
+    arxiv_id = str(
+        item.get("arxivId") or item.get("arxiv_id") or item.get("arXivId") or item.get("id") or ""
+    ).strip()
     if re.fullmatch(r"\d{4}\.\d{4,5}(?:v\d+)?", arxiv_id):
         return f"https://arxiv.org/abs/{arxiv_id}"
     return ""
@@ -172,14 +170,38 @@ def _format_alpha_item(item: dict[str, object], relevance_query: str) -> tuple[f
     title = str(item.get("title") or item.get("paperTitle") or item.get("name") or "").strip()
     if not title:
         return None
-    abstract = str(item.get("abstract") or item.get("summary") or item.get("description") or "").strip()
+    abstract = str(
+        item.get("abstract")
+        or item.get("abstractPreview")
+        or item.get("abstract_preview")
+        or item.get("summary")
+        or item.get("description")
+        or ""
+    ).strip()
     url = _alpha_url(item)
-    year = str(item.get("year") or item.get("published") or item.get("publicationYear") or "Unknown")
-    authors_value = item.get("authors") or item.get("author")
+    raw_year = (
+        item.get("year")
+        or item.get("published")
+        or item.get("publicationYear")
+        or item.get("publicationDate")
+        or item.get("publication_date")
+        or "Unknown"
+    )
+    year = str(raw_year)
+    authors_value = (
+        item.get("authors")
+        or item.get("author")
+        or item.get("organizations")
+        or item.get("organization")
+    )
+    is_organizations = not (item.get("authors") or item.get("author")) and bool(
+        item.get("organizations") or item.get("organization")
+    )
     if isinstance(authors_value, list):
         authors = ", ".join(str(author.get("name") if isinstance(author, dict) else author) for author in authors_value[:5])
     else:
         authors = str(authors_value or "Unknown")
+    author_label = "Organizations listed for this publication result" if is_organizations else "Authors listed for this publication result"
     score_text = f"{title} {abstract}"
     score = evidence_score(relevance_query, score_text, "PUBLICATION")
     if not is_relevant(relevance_query, score_text, "PUBLICATION", threshold=MIN_PUBLICATION_RERANK_SCORE):
@@ -187,10 +209,10 @@ def _format_alpha_item(item: dict[str, object], relevance_query: str) -> tuple[f
     lines = [
         f"Publication title returned by AlphaXiv: **{title}**.",
         f"Publication year returned by AlphaXiv: {year[:4] if year != 'Unknown' else year}.",
-        f"Authors listed for this publication result: {authors or 'Unknown'}.",
+        f"{author_label}: {authors or 'Unknown'}.",
     ]
     if abstract:
-        lines.append(f"Abstract excerpt from this publication record: {trim_words(abstract, ABSTRACT_WORD_LIMIT)}")
+        lines.append(f"Abstract excerpt from this publication record: {_relevant_abstract_excerpt(abstract, relevance_query)}")
     if url:
         lines.append(f"AlphaXiv URL for this publication: {url}.")
     lines.extend([
@@ -231,21 +253,21 @@ def _alpha_text_blocks(output: str, relevance_query: str, max_results: int) -> l
 
 
 async def _alpha_search_blocks(search_queries: list[str], relevance_query: str, max_results: int, seen: set[str]) -> list[tuple[float, str]]:
-    """Vyhľadá publikácie cez AlphaXiv a vráti neduplicitné skórované bloky."""
+    """Vyhľadá publikácie cez AlphaXiv MCP server a vráti neduplicitné skórované bloky."""
     blocks: list[tuple[float, str]] = []
     for search_query in search_queries:
-        output = await _run_alpha_command(search_query, "semantic")
-        if not output:
+        items = await alphaxiv_discover_papers(search_query)
+        if not items:
             continue
         parsed_blocks: list[tuple[float, str]] = []
-        try:
-            parsed = json.loads(output)
-            for item in _iter_alpha_items(parsed):
-                formatted = _format_alpha_item(item, relevance_query)
-                if formatted:
-                    parsed_blocks.append(formatted)
-        except json.JSONDecodeError:
-            parsed_blocks = _alpha_text_blocks(output, relevance_query, max_results)
+        for raw_item in items:
+            if isinstance(raw_item, dict):
+                for item in _iter_alpha_items(raw_item):
+                    formatted = _format_alpha_item(item, relevance_query)
+                    if formatted:
+                        parsed_blocks.append(formatted)
+            elif isinstance(raw_item, str) and raw_item.strip():
+                parsed_blocks.extend(_alpha_text_blocks(raw_item, relevance_query, max_results))
         for score, block in parsed_blocks:
             key = block.lower()
             if key in seen:
@@ -491,7 +513,7 @@ async def _pubmed_blocks(
                         title,
                         record.get("authors") or "",
                         record.get("year") or "",
-                        abstract,
+                        _relevant_abstract_excerpt(abstract, relevance_query),
                         doi,
                         pmid,
                         score,
@@ -563,7 +585,7 @@ async def _openalex_search(query: str, limit: int) -> list[tuple[str, str, str, 
     params = {
         "search": query,
         "per_page": min(max(1, limit) * 2, 25),
-        "select": "id,title,publication_year,authors_count,authorships,doi,abstract_inverted_index",
+        "select": "id,title,publication_year,authorships,doi,abstract_inverted_index",
         "mailto": "research-server@example.com",
     }
     async with httpx.AsyncClient(
@@ -632,7 +654,8 @@ async def _openalex_blocks(
                 threshold=MIN_PUBLICATION_RERANK_SCORE,
             ):
                 continue
-            blocks.append((score, _openalex_block(title, authors, year, abstract, doi_url, work_url, score)))
+            excerpt = _relevant_abstract_excerpt(abstract, relevance_query)
+            blocks.append((score, _openalex_block(title, authors, year, excerpt, doi_url, work_url, score)))
         if len(blocks) >= max_results:
             break
     return blocks
@@ -671,7 +694,8 @@ async def _crossref_blocks(
                 threshold=MIN_PUBLICATION_RERANK_SCORE,
             ):
                 continue
-            blocks.append((score, _crossref_block(title, authors, year, abstract, doi_url, score)))
+            excerpt = _relevant_abstract_excerpt(abstract, relevance_query)
+            blocks.append((score, _crossref_block(title, authors, year, excerpt, doi_url, score)))
         if len(blocks) >= max_results:
             break
     return blocks
@@ -685,11 +709,52 @@ _PROVIDER_QUALITY_MULTIPLIERS = {
     "semanticscholar": 1.0,
     "pubmed": 1.0,
     "openalex": 0.95,
+    "arxiv": 0.90,
     "crossref": 0.85,
     "alphaxiv": 0.80,
 }
 _PROVIDER_SOURCE_RE = re.compile(r"^SOURCE:\s*(.+?)\s*$", flags=re.IGNORECASE | re.MULTILINE)
 _PUB_DOMINANCE_RATIO = 0.7
+# Aspoň toľko výsledkov musí druhý prechod ponechať, aby sa prísnejšie
+# doménové filtrovanie nemohlo zvrhnúť na vyprázdnenie celého výsledku.
+_IDF_RERANK_MIN_KEPT = 3
+
+
+def _rerank_with_corpus_idf(
+    blocks: list[tuple[float, str]], relevance_query: str
+) -> tuple[list[tuple[float, str]], int]:
+    """Preskóruje zlúčených kandidátov s váhou podľa vzácnosti termínov.
+
+    Jednotliví poskytovatelia filtrujú každý zvlášť a v tej chvíli ešte nie je
+    známe, ktoré termíny dotazu sú v danej množine výsledkov rozlišujúce.
+    Tento druhý prechod prebieha až nad zlúčenou množinou, takže dokument
+    z inej domény, ktorý prešiel len vďaka zdieľanej generickej slovnej
+    zásobe, sa dá spoľahlivejšie odfiltrovať.
+
+    Vráti dvojicu (ponechané bloky, počet odfiltrovaných).
+    """
+    if len(blocks) < _MIN_CORPUS_FOR_IDF:
+        return blocks, 0
+    idf = build_corpus_idf([block for _score, block in blocks])
+    if not idf:
+        return blocks, 0
+    rescored: list[tuple[float, str]] = []
+    rejected: list[tuple[float, str]] = []
+    for _score, block in blocks:
+        new_score = evidence_score(relevance_query, block, "PUBLICATION", idf=idf)
+        if is_relevant(
+            relevance_query, block, "PUBLICATION", threshold=MIN_PUBLICATION_RERANK_SCORE, idf=idf
+        ):
+            rescored.append((new_score, block))
+        else:
+            rejected.append((new_score, block))
+    if len(rescored) >= _IDF_RERANK_MIN_KEPT or not rejected:
+        return rescored, len(rejected)
+    # Pri veľmi prísnom výsledku sa doplnia najlepšie zamietnuté, aby sa
+    # nestratilo pokrytie zdroja úplne.
+    rejected.sort(key=lambda item: item[0], reverse=True)
+    fill = _IDF_RERANK_MIN_KEPT - len(rescored)
+    return rescored + rejected[:fill], max(0, len(rejected) - fill)
 
 
 def _extract_block_provider(block: str) -> str:
@@ -765,9 +830,10 @@ async def _semantic_scholar_blocks(
                     f"Publication title returned by Semantic Scholar: **{item.get('title', 'Untitled')}**.",
                     f"Publication year returned by Semantic Scholar: {item.get('year', 'Unknown')}.",
                     f"Authors listed for this publication result: {authors or 'Unknown'}.",
-                    f"Abstract excerpt from this publication record: {trim_words(abstract, 60)}",
+                    f"Abstract excerpt from this publication record: {_relevant_abstract_excerpt(abstract, relevance_query)}",
                     f"DOI URL constructed for this publication: {doi_url}.",
                     f"Semantic Scholar URL for this publication: {item.get('url', 'Not available')}.",
+                    "SOURCE: SemanticScholar",
                 ]
             )
             score = evidence_score(relevance_query, block, "PUBLICATION")
@@ -796,6 +862,40 @@ async def _alpha_blocks_safe(
     """Bezpečne spustí AlphaXiv vyhľadávanie a pri chybe vráti prázdny zoznam."""
     try:
         return await _alpha_search_blocks(search_queries, relevance_query, max_results, set())
+    except Exception:
+        return []
+
+
+async def _arxiv_blocks_safe(
+    search_queries: list[str], relevance_query: str, max_results: int
+) -> list[tuple[float, str]]:
+    """Spustí arXiv ako paralelného providera a vráti skórované bloky publikácií."""
+    try:
+        blocks: list[tuple[float, str]] = []
+        seen: set[str] = set()
+        for search_query in search_queries:
+            output = await arxiv_search(search_query, max_results)
+            if _looks_failed(output):
+                continue
+            for block in re.split(r"\n\s*\n", output or ""):
+                block = block.strip()
+                if "Publication title returned by ArXiv" not in block:
+                    continue
+                score = evidence_score(relevance_query, block, "PUBLICATION")
+                if not is_relevant(
+                    relevance_query, block, "PUBLICATION", threshold=MIN_PUBLICATION_RERANK_SCORE
+                ):
+                    continue
+                key = block.lower()[:200]
+                if key in seen:
+                    continue
+                seen.add(key)
+                blocks.append(
+                    (score, f"{block}\nLocal rerank score for this publication: {score}/10.")
+                )
+            if len(blocks) >= max_results:
+                break
+        return blocks
     except Exception:
         return []
 
@@ -829,10 +929,11 @@ async def publications_search(
                 _alpha_blocks_safe(search_queries, relevance_query, max_results),
                 _pubmed_blocks_safe(search_queries, relevance_query, max_results),
                 _openalex_blocks_safe(search_queries, relevance_query, max_results),
+                _arxiv_blocks_safe(search_queries, relevance_query, max_results),
                 return_exceptions=True,
             )
 
-        s2_outcome, cr_outcome, ax_outcome, pubmed_outcome, openalex_outcome = outcomes
+        s2_outcome, cr_outcome, ax_outcome, pubmed_outcome, openalex_outcome, arxiv_outcome = outcomes
         s2_blocks: list[tuple[float, str]] = []
         primary_errored = False
         rate_limited = False
@@ -868,10 +969,16 @@ async def publications_search(
         else:
             openalex_blocks = openalex_outcome
 
+        arxiv_blocks: list[tuple[float, str]] = []
+        if isinstance(arxiv_outcome, BaseException):
+            provider_errors.append(f"arxiv: {arxiv_outcome}")
+        else:
+            arxiv_blocks = arxiv_outcome
+
         merged: list[tuple[float, str]] = []
         seen_dois: set[str] = set()
         seen_titles: set[str] = set()
-        for block_list in (s2_blocks, cr_blocks, pubmed_blocks, openalex_blocks, ax_blocks):
+        for block_list in (s2_blocks, cr_blocks, pubmed_blocks, openalex_blocks, arxiv_blocks, ax_blocks):
             for score, block in block_list:
                 doi_key, title_key = _publication_dedupe_keys(block)
                 if doi_key and doi_key in seen_dois:
@@ -883,6 +990,8 @@ async def publications_search(
                 if title_key:
                     seen_titles.add(title_key)
                 merged.append((score, block))
+
+        merged, idf_dropped = _rerank_with_corpus_idf(merged, relevance_query)
 
         def _sort_score(item: tuple[float, str]) -> float:
             """Upraví skóre výsledku podľa kvality poskytovateľa."""
@@ -920,6 +1029,11 @@ async def publications_search(
                 )
             if dominance_note:
                 notes.append(dominance_note)
+            if idf_dropped:
+                notes.append(
+                    f"Corpus-relative rerank dropped {idf_dropped} candidate(s) that matched only "
+                    "generic vocabulary shared across unrelated domains."
+                )
             if provider_counts:
                 provenance = ", ".join(
                     f"{name}={count}" for name, count in sorted(provider_counts.items())

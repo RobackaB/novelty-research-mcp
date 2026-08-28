@@ -15,7 +15,8 @@ from bs4 import BeautifulSoup
 from .chromium_scraper import fetch_page_html
 from .jina_reader import fetch_via_jina
 from .output_cleaner import BLOCKED_WEB_DOMAINS, USER_AGENT, clean_output, format_error, trim_words
-from .relevance import evidence_score, is_relevant, tokens
+from .relevance import build_corpus_idf, evidence_score, is_relevant, tokens
+from .requirement_match import unique_coverage_tokens
 from .result_contract import NormalizedResult, prepend_markers
 from .search_bounds import section_query_variants
 
@@ -39,6 +40,8 @@ TEXT_CONTENT_TYPES = ("text/html", "text/plain", "application/xhtml+xml", "appli
 FETCH_TOTAL_TIMEOUT_MS = 14000
 MIN_EXTRACTED_WORDS = 12
 FETCH_CONTENT_WORDS = 450
+FETCH_ANALYSIS_WORDS = 900
+FETCH_ANALYSIS_SENTENCES = 24
 SEARCH_CANDIDATE_POOL_SIZE = 15
 MIN_WEB_RERANK_SCORE = 5.0
 SEARCH_PAGE_DOMAINS = {
@@ -126,7 +129,12 @@ def _query_terms(query: str) -> set[str]:
         if token not in stopwords
     }
 
-def _compact_content(text: str, query: str = "", max_words: int = FETCH_CONTENT_WORDS) -> str:
+def _compact_content(
+    text: str,
+    query: str = "",
+    max_words: int = FETCH_CONTENT_WORDS,
+    max_sentences: int = 8,
+) -> str:
     """Skráti obsah stránky na vety najrelevantnejšie k dotazu."""
     text = re.sub(r"\s+", " ", text or "").strip()
     if not text:
@@ -144,7 +152,7 @@ def _compact_content(text: str, query: str = "", max_words: int = FETCH_CONTENT_
     if not scored:
         return trim_words(text, max_words)
     scored.sort(key=lambda row: (-row[0], row[1]))
-    selected_indexes = sorted({index for _score, index, _sentence in scored[:8]})
+    selected_indexes = sorted({index for _score, index, _sentence in scored[: max(1, max_sentences)]})
     excerpt = " ".join(sentences[index] for index in selected_indexes)
     return trim_words(excerpt, max_words)
 
@@ -242,13 +250,28 @@ def _format_fetch_result(url: str, date: str, content: str, status: str, query: 
     compact = _compact_content(content, query=query)
     if not _has_meaningful_content(compact):
         return _unsupported_fetch("No meaningful text content was extracted from the page within the fetch budget.", url)
-    return clean_output(
-        f"SOURCE_URL: {url} was the page requested.\n"
-        f"DATE: {date} was the best date found.\n"
-        f"CONTENT: {compact}\n"
-        f"STATUS: {status}\n"
-        "EVIDENCE_LEVEL: FULLTEXT_VERIFIED"
+    analysis = _compact_content(
+        content,
+        query=query,
+        max_words=FETCH_ANALYSIS_WORDS,
+        max_sentences=FETCH_ANALYSIS_SENTENCES,
     )
+    lines = [
+        f"SOURCE_URL: {url} was the page requested.",
+        f"DATE: {date} was the best date found.",
+        f"CONTENT: {compact}",
+        f"STATUS: {status}",
+        "EVIDENCE_LEVEL: FULLTEXT_VERIFIED",
+    ]
+    if analysis and analysis != compact:
+        lines.append(f"ANALYSIS: {analysis}")
+    cleaned = clean_output("\n".join(lines))
+    # Tokeny celej stránky sa pridávajú až po clean_output, aby ich filter
+    # riadkov neodstránil; slúžia výhradne na výpočet pokrytia prvkov dotazu.
+    token_line = unique_coverage_tokens(content)
+    if token_line:
+        cleaned += f"\nCOVERAGE_TOKENS: {token_line}"
+    return cleaned
 
 _MDPI_ISSN_TO_CODE: dict[str, str] = {
     "1424-8220": "s",            
@@ -587,7 +610,7 @@ def _canonical_fetch_url(url: str) -> str:
 def _unsupported_fetch(reason: str, url: str) -> str:
     """Vytvorí štandardný chybový výstup pre nepodporené načítanie stránky."""
     return "\n".join([
-        f"TOOL_ERROR: web_fetch",
+        "TOOL_ERROR: web_fetch",
         f"REASON: {reason}",
         f"URL: {url}",
         "STATUS: FAILED",
@@ -680,6 +703,28 @@ async def web_search(query: Any, max_results: int = 5) -> str:
                     provider_notes.append(f"{provider_name} unavailable: {slot['unavailable_excs'][0]}")
 
         if merged_results:
+            # Druhý prechod nad zlúčenou množinou: až tu je známe, ktoré termíny
+            # dotazu sú v danej sade výsledkov rozlišujúce a ktoré zdieľajú
+            # všetky (a teda nenesú informáciu).
+            corpus_idf = build_corpus_idf(
+                [f"{title}\n{snippet}" for _u, title, snippet, _s in merged_results.values()]
+            )
+            if corpus_idf:
+                rescored: dict[str, tuple[str, str, str, float]] = {}
+                for url, title, snippet, _old in merged_results.values():
+                    block = f"{title}\n{snippet}"
+                    if not is_relevant(
+                        relevance_query, block, "WEB", threshold=MIN_WEB_RERANK_SCORE, idf=corpus_idf
+                    ):
+                        continue
+                    rescored[url] = (
+                        url,
+                        title,
+                        snippet,
+                        evidence_score(relevance_query, block, "WEB", idf=corpus_idf),
+                    )
+                if rescored:
+                    merged_results = rescored
             ranked = sorted(
                 merged_results.values(),
                 key=lambda row: (-row[3], _rank_domain(row[0])),

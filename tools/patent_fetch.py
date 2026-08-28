@@ -12,16 +12,41 @@ from typing import Awaitable, Callable
 import httpx
 from bs4 import BeautifulSoup
 
+from ._ttl_cache import TTLCache
 from .chromium_scraper import PlaywrightTimeoutError, fetch_page_html_and_text
 from .output_cleaner import USER_AGENT, clean_output, first_match, format_error, soup_text, trim_words
+from .pdf_fetch import pdf_fetch_text
+from .requirement_match import unique_coverage_tokens
 
 FETCH_CACHE_TTL_SECONDS = 3600
 MAX_FETCH_ATTEMPTS = 2
-_PATENT_FETCH_CACHE: dict[str, tuple[float, str]] = {}
+_PATENT_FETCH_CACHE: TTLCache[str, str] = TTLCache(
+    ttl_seconds=FETCH_CACHE_TTL_SECONDS, max_entries=256
+)
 
 _STATIC_PATENT_COUNTRY_RE = re.compile(
     r"/patent/(?P<cc>CN|JP|KR|RU|IN|TW|HK|SG|BR|MX)\d", flags=re.IGNORECASE
 )
+
+# Google patents.google.com aktívne blokuje shlukované automatizované požiadavky
+# ("...your computer or network may be sending automated queries...", HTTP 503).
+# Live overenie ukázalo, že tento blok sa spúšťa aj pri jednej požiadavke z bežnej
+# siete, keď sa v krátkom čase pošle veľa detailových fetchov naraz — preto
+# obmedzujeme súbežnosť samostatným semaforom nezávisle od toho, koľko patentov
+# sa spracúva paralelne na vyššej úrovni (patent_evidence_pack).
+_GOOGLE_PATENTS_CONCURRENCY = 2
+_GOOGLE_PATENTS_SEMAPHORE = asyncio.Semaphore(_GOOGLE_PATENTS_CONCURRENCY)
+_BOT_BLOCK_MARKERS = (
+    "sending automated queries",
+    "our systems have detected unusual traffic",
+    "unusual traffic from your computer network",
+)
+
+
+def _is_bot_block_page(html: str) -> bool:
+    """Rozpozná Google stránku s upozornením na automatizované požiadavky."""
+    lower = (html or "")[:4000].lower()
+    return any(marker in lower for marker in _BOT_BLOCK_MARKERS)
 
 
 def _patent_country_prefers_static(url: str) -> bool:
@@ -45,6 +70,39 @@ async def _static_patent_fetch(url: str, timeout_ms: int) -> tuple[str, str]:
     return html, text
 
 
+async def _wayback_patent_fetch(url: str, timeout_ms: int) -> tuple[str, str]:
+    """Skúsi načítať archivovanú snímku patentovej stránky z Wayback Machine.
+
+    Best-effort náhrada, keď Google Patents zablokuje priamy prístup; Wayback
+    dostupnosť pre konkrétnu stránku nie je garantovaná.
+    """
+    avail_timeout = max(3.0, min(8.0, timeout_ms / 3000))
+    async with httpx.AsyncClient(
+        headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=avail_timeout
+    ) as client:
+        response = await client.get("https://archive.org/wayback/available", params={"url": url})
+        payload = response.json() if response.status_code < 400 else {}
+    closest = ((payload or {}).get("archived_snapshots") or {}).get("closest") or {}
+    snapshot_url = str(closest.get("url") or "").strip()
+    if not snapshot_url or not closest.get("available"):
+        return "", ""
+    fetch_timeout = max(5.0, min(15.0, timeout_ms / 1000))
+    async with httpx.AsyncClient(
+        headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=fetch_timeout
+    ) as client:
+        response = await client.get(snapshot_url)
+        if response.status_code >= 400:
+            return "", ""
+        html = response.text or ""
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text(" ", strip=True) if soup else ""
+    return html, text
+
+
+class BotBlockedError(RuntimeError):
+    """Signalizuje, že zdroj zablokoval prístup ako podozrivý na automatizáciu."""
+
+
 @dataclass(frozen=True)
 class PatentFetchProvider:
     name: str
@@ -52,18 +110,86 @@ class PatentFetchProvider:
 
 
 async def _google_patents_fetch(url: str, timeout_ms: int) -> tuple[str, str]:
-    """Načíta Google Patents stránku staticky alebo cez Chromium fallback."""
+    """Načíta Google Patents stránku staticky alebo cez Chromium fallback.
+
+    Súbežnosť voči patents.google.com je obmedzená spoločným semaforom, aby
+    sa znížila šanca na spustenie ochrany proti automatizovaným požiadavkam.
+    """
     if _patent_country_prefers_static(url):
         try:
             html, text = await _static_patent_fetch(url, timeout_ms)
-            if html:
+            if html and not _is_bot_block_page(html):
                 return html, text
         except Exception:
             pass
-    return await fetch_page_html_and_text(url, timeout_ms=max(5000, min(timeout_ms, 60000)))
+    async with _GOOGLE_PATENTS_SEMAPHORE:
+        html, text = await fetch_page_html_and_text(
+            url, timeout_ms=max(5000, min(timeout_ms, 60000))
+        )
+    if _is_bot_block_page(html):
+        wayback_html, wayback_text = await _wayback_patent_fetch(url, timeout_ms)
+        if wayback_html and not _is_bot_block_page(wayback_html):
+            return wayback_html, wayback_text
+        raise BotBlockedError("Google Patents returned an automated-query block page.")
+    return html, text
 
 
 PATENT_FETCH_PROVIDERS = (PatentFetchProvider("google_patents", _google_patents_fetch),)
+
+# Markery, podľa ktorých sa v texte oficiálneho PDF rozpozná sekcia nárokov.
+_PDF_CLAIMS_MARKERS = (
+    "what is claimed",
+    "i claim",
+    "we claim",
+    "the invention claimed is",
+    "claims",
+)
+_PDF_MIN_WORDS = 200
+
+
+def _pdf_claims_present(text: str) -> bool:
+    """Zistí, či text oficiálneho PDF obsahuje sekciu patentových nárokov."""
+    lower = (text or "").lower()
+    return any(marker in lower for marker in _PDF_CLAIMS_MARKERS)
+
+
+def _pdf_fields(url: str, pdf_url: str, text: str, attempt_log: list[dict[str, object]]) -> str:
+    """Zostaví výstup patent_fetch z plného textu oficiálneho patentového PDF.
+
+    Patentové PDF majú dvojstĺpcovú sadzbu a pri extrakcii sa riadky oboch
+    stĺpcov prekladajú, takže doslovné znenie jedného nároku sa z nich nedá
+    spoľahlivo odcitovať. Text je však plnohodnotný na overenie pokrytia
+    prvkov dotazu (to pracuje s výskytom termínov), preto sa posiela ako
+    COVERAGE_TOKENS a nie ako čitateľný citát.
+    """
+    has_claims = _pdf_claims_present(text)
+    word_count = len(text.split())
+    # CLAIM1 a ABSTRACT zámerne nesú štandardné "nenájdené" sentinely: doslovný
+    # citát z dvojstĺpcového PDF by bol zlomený, preto sa nezobrazuje ani
+    # nezapočítava do pokrytia. Skutočný obsah dokumentu ide cez COVERAGE_TOKENS.
+    lines = [
+        "PATENT_NUMBER: Unknown was identified from the page.",
+        "FILED: Unknown was identified on the page.",
+        "ASSIGNEE: Unknown was identified on the page.",
+        "CLAIM1: No first claim quote was extracted because the official PDF uses a two-column layout.",
+        "ABSTRACT: No abstract section was quoted; the full official PDF text was used for element coverage.",
+        f"STATUS: {'OK' if has_claims else 'PARTIAL'} was returned for this extraction.",
+        f"EVIDENCE_LEVEL: {'CLAIM_VERIFIED' if has_claims else 'ABSTRACT_VERIFIED'}",
+        f"PDF_CLAIMS_SECTION: {'present' if has_claims else 'absent'}",
+        f"PDF_SOURCE_URL: {pdf_url}",
+        f"PDF_FULLTEXT_WORDS: {word_count}",
+    ]
+    body = clean_output("\n".join(lines))
+    token_line = unique_coverage_tokens(text)
+    if token_line:
+        body += f"\nCOVERAGE_TOKENS: {token_line}"
+    return _with_fetch_diagnostics(body, "google_patents_pdf", attempt_log)
+
+
+async def _patent_pdf_fetch(pdf_url: str, timeout_ms: int) -> str:
+    """Stiahne oficiálne patentové PDF a vráti z neho extrahovaný text."""
+    timeout_s = max(10.0, min(timeout_ms / 1000.0 * 2, 40.0))
+    return await pdf_fetch_text(pdf_url, timeout_s=timeout_s, max_pages=30)
 
 
 def _extract_first_claim_from_html(soup: BeautifulSoup) -> str:
@@ -176,7 +302,23 @@ def _extract_fields(url: str, html: str, rendered_text: str, provider: str, atte
             abstract = meta_abstract
     if not abstract:
         abstract = "No abstract section was found."
-    claims = soup_text(soup.select_one(".claims, #claims, section[itemprop='claims'], claim-text"))
+    claims_container = soup.select_one(".claims, #claims, section[itemprop='claims']")
+    claims = soup_text(claims_container if claims_container is not None else soup.select_one("claim-text"))
+    description = ""
+    for selector in (
+        "section[itemprop='description']",
+        "#descriptionText",
+        "#description",
+        ".description",
+        "[itemprop='description']",
+    ):
+        node = soup.select_one(selector)
+        if node is None:
+            continue
+        text = soup_text(node)
+        if len(text.split()) >= 20:
+            description = text
+            break
     claim1 = _extract_first_claim_from_html(soup)
     if not claim1:
         claim1 = _extract_claim1(f"{claims}\n{rendered_text}")
@@ -184,32 +326,69 @@ def _extract_fields(url: str, html: str, rendered_text: str, provider: str, atte
     has_abstract = bool(abstract and "No abstract section" not in abstract)
     status = "OK" if has_claim else "PARTIAL" if has_abstract else "FAILED"
     evidence_level = "CLAIM_VERIFIED" if has_claim else "ABSTRACT_VERIFIED" if has_abstract else "FETCH_FAILED"
-    return _with_fetch_diagnostics(
-        "\n".join(
-            [
-                f"PATENT_NUMBER: {patent_no} was identified from the page.",
-                f"FILED: {filed} was identified on the page.",
-                f"ASSIGNEE: {assignee} was identified on the page.",
-                f"CLAIM1: {trim_words(claim1, 80)}",
-                f"ABSTRACT: {trim_words(abstract or 'No abstract section was found.', 50)}",
-                f"STATUS: {status} was returned for this extraction.",
-                f"EVIDENCE_LEVEL: {evidence_level}",
-            ]
-        ),
-        provider,
-        attempt_log,
-    )
+    claims_compact = re.sub(r"\s+", " ", claims or "").strip()
+    description_compact = re.sub(r"\s+", " ", description or "").strip()
+    lines = [
+        f"PATENT_NUMBER: {patent_no} was identified from the page.",
+        f"FILED: {filed} was identified on the page.",
+        f"ASSIGNEE: {assignee} was identified on the page.",
+        f"CLAIM1: {trim_words(claim1, 80)}",
+        f"ABSTRACT: {trim_words(abstract or 'No abstract section was found.', 50)}",
+        f"STATUS: {status} was returned for this extraction.",
+        f"EVIDENCE_LEVEL: {evidence_level}",
+    ]
+    if claims_compact and len(claims_compact.split()) >= 8:
+        lines.append(f"CLAIMS_TEXT: {trim_words(claims_compact, 1200)}")
+    if description_compact and len(description_compact.split()) >= 20:
+        lines.append(f"DESCRIPTION_TEXT: {trim_words(description_compact, 1500)}")
+    return _with_fetch_diagnostics("\n".join(lines), provider, attempt_log)
 
 
-async def patent_fetch(url: str, timeout_ms: int = 30000) -> str:
-    """Načíta patentovú stránku a vytiahne z nej základné údaje."""
-    cache_key = f"{url}|{max(5000, min(timeout_ms, 60000))}"
+async def patent_fetch(url: str, timeout_ms: int = 30000, pdf_url: str = "") -> str:
+    """Načíta patentový dokument a vytiahne z neho základné údaje.
+
+    Ak je známa adresa oficiálneho PDF, použije sa prednostne: obsahuje plný
+    text nárokov aj opisu vynálezu a na rozdiel od HTML stránky nepodlieha
+    ochrane proti automatizovaným požiadavkam. HTML stránka slúži ako záloha.
+    """
+    cache_key = f"{url}|{max(5000, min(timeout_ms, 60000))}|{pdf_url}"
     cached = _PATENT_FETCH_CACHE.get(cache_key)
-    if cached and time.time() - cached[0] <= FETCH_CACHE_TTL_SECONDS:
-        return cached[1]
+    if cached is not None:
+        return cached
     attempt_log: list[dict[str, object]] = []
     last_error = ""
+    was_blocked = False
     provider = PATENT_FETCH_PROVIDERS[0]
+
+    if pdf_url:
+        started = time.perf_counter()
+        try:
+            pdf_text = await _patent_pdf_fetch(pdf_url, timeout_ms)
+        except Exception as exc:
+            pdf_text = ""
+            last_error = str(exc)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        if pdf_text and len(pdf_text.split()) >= _PDF_MIN_WORDS:
+            attempt_log.append(
+                {
+                    "provider": "google_patents_pdf",
+                    "attempt": 1,
+                    "status": "ok",
+                    "word_count": len(pdf_text.split()),
+                    "elapsed_ms": elapsed_ms,
+                }
+            )
+            result = _pdf_fields(url, pdf_url, pdf_text, attempt_log)
+            _PATENT_FETCH_CACHE.set(cache_key, result)
+            return result
+        attempt_log.append(
+            {
+                "provider": "google_patents_pdf",
+                "attempt": 1,
+                "status": "empty" if not last_error else "failed",
+                "elapsed_ms": elapsed_ms,
+            }
+        )
     for attempt in range(1, MAX_FETCH_ATTEMPTS + 1):
         started = time.perf_counter()
         try:
@@ -223,7 +402,7 @@ async def patent_fetch(url: str, timeout_ms: int = 30000) -> str:
                 }
             )
             result = _extract_fields(url, html, rendered_text, provider.name, attempt_log)
-            _PATENT_FETCH_CACHE[cache_key] = (time.time(), result)
+            _PATENT_FETCH_CACHE.set(cache_key, result)
             return result
         except PlaywrightTimeoutError:
             last_error = "timeout"
@@ -232,6 +411,17 @@ async def patent_fetch(url: str, timeout_ms: int = 30000) -> str:
                     "provider": provider.name,
                     "attempt": attempt,
                     "status": "timeout",
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                }
+            )
+        except BotBlockedError as exc:
+            was_blocked = True
+            last_error = str(exc)
+            attempt_log.append(
+                {
+                    "provider": provider.name,
+                    "attempt": attempt,
+                    "status": "blocked",
                     "elapsed_ms": int((time.perf_counter() - started) * 1000),
                 }
             )
@@ -249,6 +439,22 @@ async def patent_fetch(url: str, timeout_ms: int = 30000) -> str:
         if attempt < MAX_FETCH_ATTEMPTS:
             await asyncio.sleep(min(0.25 * (2 ** (attempt - 1)), 2.0))
 
+    if was_blocked:
+        return _with_fetch_diagnostics(
+            "\n".join(
+                [
+                    "PATENT_NUMBER: Unknown was identified from the page.",
+                    "FILED: Unknown was identified on the page.",
+                    "ASSIGNEE: Unknown was identified on the page.",
+                    "CLAIM1: No claim excerpt could be extracted because the source blocked automated access.",
+                    "ABSTRACT: No abstract excerpt could be extracted because the source blocked automated access.",
+                    "STATUS: BLOCKED was returned for this extraction.",
+                    "EVIDENCE_LEVEL: FETCH_BLOCKED",
+                ]
+            ),
+            provider.name,
+            attempt_log,
+        )
     if last_error == "timeout":
         return _with_fetch_diagnostics(
             "\n".join(

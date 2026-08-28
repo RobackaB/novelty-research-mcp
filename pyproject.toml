@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-research-server"
-version = "0.1.0"
+version = "0.9.2"
 description = "MCP server for web, patent, and publication research."
 requires-python = ">=3.11"
 dependencies = [
@@ -15,11 +15,23 @@ dependencies = [
   "lxml>=5.0.0",
   "arxiv>=2.1.0",
   "python-dotenv>=1.0.0",
+  "pypdf>=4.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.23.0",
 ]
 
 [project.scripts]
 mcp-research-server = "server:main"
+mcp-research-server-http = "server_http:main"
 
 [tool.setuptools]
-py-modules = ["server"]
+py-modules = ["server", "server_http", "terminal_ui"]
 packages = ["tools"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

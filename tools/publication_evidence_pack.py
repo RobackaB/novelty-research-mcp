@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from dataclasses import dataclass
+from typing import Any
+
+import httpx
 
 from ._hit_sort import sort_hits_by_relevance
-from .output_cleaner import trim_words
+from .output_cleaner import USER_AGENT, trim_words
+from .pdf_fetch import pdf_fetch_text
 from .publication_fetch import publication_fetch
 from .publications_search import publications_search
 from .query_normalize import clean_tool_query
 from .relevance import discriminative_tokens, evidence_score, subject_anchors, tokens
+from .requirement_match import atom_coverage, unique_coverage_tokens
 from .result_contract import (
     parse_completed_marker,
     parse_error_count,
@@ -20,6 +26,70 @@ from .result_contract import (
     parse_status_marker,
 )
 from .source_verify import verify_sources
+
+_ATOM_COVERAGE_FOCUSED_THRESHOLD = 0.5
+_VERIFIED_PUBLICATION_EVIDENCE_LEVELS = frozenset(
+    {"abstract_verified", "verified_metadata", "fetched_excerpt"}
+)
+_PUBLICATION_FULLTEXT_MAX = 3
+_UNPAYWALL_TIMEOUT_S = 8.0
+_UNPAYWALL_DEFAULT_EMAIL = "research-server@flowise-mcp.local"
+
+_ARXIV_ABS_RE = re.compile(r"arxiv\.org/abs/([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)", re.IGNORECASE)
+
+
+def _direct_pdf_url(candidate: "PublicationCandidate") -> str:
+    """Určí priamu URL plného PDF textu bez sieťového vyhľadávania (arXiv, .pdf)."""
+    url = candidate.url or ""
+    arxiv_match = _ARXIV_ABS_RE.search(url)
+    if arxiv_match:
+        return f"https://arxiv.org/pdf/{arxiv_match.group(1)}"
+    if url.lower().split("?", 1)[0].endswith(".pdf"):
+        return url
+    return ""
+
+
+async def _unpaywall_pdf_url(doi: str) -> str:
+    """Vyhľadá voľne dostupný PDF odkaz pre DOI cez bezplatné Unpaywall API.
+
+    Bez API kľúča, ale vyžaduje kontaktný e-mail v dopyte (politika Unpaywall);
+    placeholder adresy v tvare *@example.com sú odmietnuté, preto sa používa
+    vlastná .local doména. Pri akejkoľvek chybe alebo zatvorenom prístupe
+    vráti prázdny reťazec.
+    """
+    clean_doi = (doi or "").strip().strip("/")
+    if not clean_doi:
+        return ""
+    email = os.getenv("UNPAYWALL_EMAIL", "").strip() or _UNPAYWALL_DEFAULT_EMAIL
+    try:
+        async with httpx.AsyncClient(
+            headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=_UNPAYWALL_TIMEOUT_S
+        ) as client:
+            response = await client.get(
+                f"https://api.unpaywall.org/v2/{clean_doi}", params={"email": email}
+            )
+            if response.status_code >= 400:
+                return ""
+            data = response.json()
+    except Exception:
+        return ""
+    if not isinstance(data, dict) or not data.get("is_oa"):
+        return ""
+    best = data.get("best_oa_location") or {}
+    if not isinstance(best, dict):
+        return ""
+    pdf_url = str(best.get("url_for_pdf") or "").strip()
+    return pdf_url
+
+
+async def _resolve_pdf_url(candidate: "PublicationCandidate") -> str:
+    """Určí URL plného PDF textu publikácie priamo alebo cez Unpaywall podľa DOI."""
+    direct = _direct_pdf_url(candidate)
+    if direct:
+        return direct
+    if candidate.doi:
+        return await _unpaywall_pdf_url(candidate.doi)
+    return ""
 
 TITLE_RE = re.compile(r"(?:Publication|Paper) title[^:]*:\s*\*\*(.*?)\*\*\.?", flags=re.I | re.S)
 ABSTRACT_RE = re.compile(r"Abstract excerpt[^:]*:\s*(.*?)(?:\n(?:DOI|Semantic Scholar|ArXiv|Paper landing page|SOURCE|Local rerank)|$)", flags=re.I | re.S)
@@ -171,6 +241,7 @@ async def publication_evidence_pack(
     max_fetches: int = 4,
     fetch_timeout_s: float = 12.0,
     english_query: str = "",
+    atomic_requirements: list[dict[str, Any]] | None = None,
 ) -> str:
     """Vyhľadá a spracuje publikačné dôkazy pre zadaný dotaz."""
     warnings: list[str] = []
@@ -234,6 +305,33 @@ async def publication_evidence_pack(
             else:
                 fetch_outputs.append(str(item))
 
+    # Plné texty voľne dostupných PDF (arXiv, priame .pdf odkazy, alebo open-access
+    # PDF nájdené cez Unpaywall podľa DOI) pre presnejšie pokrytie prvkov dotazu
+    # obsahom celého článku, nie iba abstraktom.
+    fulltext_by_index: dict[int, str] = {}
+    if atomic_requirements:
+        resolved_urls = await asyncio.gather(
+            *[_resolve_pdf_url(candidate) for candidate in candidates[:fetch_limit]],
+            return_exceptions=True,
+        )
+        pdf_targets = [
+            (index, url)
+            for index, url in enumerate(resolved_urls)
+            if isinstance(url, str) and url
+        ][:_PUBLICATION_FULLTEXT_MAX]
+        if pdf_targets:
+            pdf_texts = await asyncio.gather(
+                *[
+                    pdf_fetch_text(url, timeout_s=max(10.0, fetch_timeout_s * 2))
+                    for _index, url in pdf_targets
+                ],
+                return_exceptions=True,
+            )
+            for (index, _url), text in zip(pdf_targets, pdf_texts):
+                if isinstance(text, Exception) or not text:
+                    continue
+                fulltext_by_index[index] = str(text)
+
     verification = ""
     if candidates:
         try:
@@ -251,32 +349,53 @@ async def publication_evidence_pack(
         fetch_output = fetch_outputs[index] if index < len(fetch_outputs) else ""
         evidence_level = _fetch_level(fetch_output) if fetch_output else "search_snippet_only"
         fetched_summary = _fetch_summary(fetch_output) if fetch_output else ""
+        fulltext = fulltext_by_index.get(index, "")
         if fetch_output and evidence_level == "fetch_failed":
             warnings.append(f"Publication fetch did not verify {candidate.url}: {trim_words(fetch_output, 40)}")
             if candidate.summary and len(candidate.summary.split()) >= 12:
                 evidence_level = "verified_metadata"
+        if fulltext and evidence_level in {"search_snippet_only", "fetch_failed"}:
+            evidence_level = "fetched_excerpt"
         summary_parts = [f"Search evidence: {candidate.summary}"]
         if fetched_summary:
             summary_parts.append(fetched_summary)
         summary = trim_words(" ".join(summary_parts), 120)
         relevance = _publication_relevance(relevance_query, candidate.title, summary)
-        hits.append(
-            {
-                "title": candidate.title,
-                "url": candidate.url,
-                "doi": candidate.doi,
-                "evidence_level": evidence_level,
-                "summary": summary,
-                "verified_url": bool(verified.get(candidate.url, False)),
-                "relevance": relevance,
-                "relevance_score": evidence_score(
-                    relevance_query,
-                    f"{candidate.title} {summary}",
-                    "PUBLICATION",
-                    evidence_level,
-                ),
-            }
-        )
+        hit_record: dict[str, object] = {
+            "title": candidate.title,
+            "url": candidate.url,
+            "doi": candidate.doi,
+            "evidence_level": evidence_level,
+            "summary": summary,
+            "verified_url": bool(verified.get(candidate.url, False)),
+            "relevance": relevance,
+            "relevance_score": evidence_score(
+                relevance_query,
+                f"{candidate.title} {summary}",
+                "PUBLICATION",
+                evidence_level,
+            ),
+        }
+        if fulltext:
+            hit_record["fulltext_analyzed"] = True
+            hit_record["fulltext_word_count"] = len(fulltext.split())
+        if atomic_requirements:
+            fulltext_tokens = unique_coverage_tokens(fulltext) if fulltext else ""
+            coverage_blob = " ".join(
+                part
+                for part in (candidate.title, candidate.summary, fetched_summary, fulltext_tokens)
+                if part
+            )
+            coverage, matched = atom_coverage(coverage_blob, atomic_requirements)
+            hit_record["atom_coverage"] = coverage
+            hit_record["atom_match_count"] = matched
+            evidence_verified = evidence_level in _VERIFIED_PUBLICATION_EVIDENCE_LEVELS
+            if evidence_verified and coverage >= _ATOM_COVERAGE_FOCUSED_THRESHOLD:
+                hit_record["relevance"] = "focused"
+            hit_record["exact_combination_candidate_found"] = bool(
+                evidence_verified and coverage >= 1.0
+            )
+        hits.append(hit_record)
 
     focused_hits = [hit for hit in hits if hit.get("relevance") == "focused"]
     hits = sort_hits_by_relevance(hits)

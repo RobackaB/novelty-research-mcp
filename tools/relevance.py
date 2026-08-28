@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Literal
 
@@ -33,28 +34,53 @@ BROAD_QUERY_TERMS = STOPWORDS | PATENT_STRUCTURAL | PUBLICATION_STRUCTURAL | WEB
     "development", "prior", "art", "results",
 }
 THRESHOLDS: dict[EvidenceType, float] = {"PATENT": 3.0, "PUBLICATION": 3.0, "WEB": 2.8}
+# Pod týmto počtom kandidátov nemá výpočet vzácnosti termínov štatistický zmysel.
+_MIN_CORPUS_FOR_IDF = 3
+_DEFAULT_IDF_WEIGHT = 1.0
+
+
+# Množné číslo sa odstraňuje ako prvé. Pôvodné poradie spôsobovalo, že
+# "application" -> "applicate", ale "applications" -> "application", takže
+# jednotné a množné číslo toho istého slova sa nikdy nezhodovali. Podobne
+# strážna podmienka na dĺžku 4 nechávala "logs" nezmenené, zatiaľ čo "log"
+# zostávalo "log" — dokument o logoch tak nedostal voči dotazu žiadny kredit.
+_PLURAL_RULES = (
+    ("ies", "y"),
+    ("sses", "ss"),
+    ("shes", "sh"),
+    ("ches", "ch"),
+    ("xes", "x"),
+    ("zes", "z"),
+    ("s", ""),
+)
+_DERIVATIONAL_RULES = (
+    ("ization", "ize"),
+    ("ational", "ate"),
+    ("ation", "ate"),
+    ("iveness", "ive"),
+    ("fulness", "ful"),
+    ("ousness", "ous"),
+    ("ically", "ic"),
+    ("ing", ""),
+    ("edly", ""),
+    ("ed", ""),
+    ("ers", ""),
+    ("er", ""),
+)
 
 
 def _stem(token: str) -> str:
     """Zjednoduší anglický token na približný koreň slova."""
+    if len(token) <= 3:
+        return token
+    if not token.endswith("ss"):
+        for suffix, replacement in _PLURAL_RULES:
+            if token.endswith(suffix) and len(token) - len(suffix) >= 3:
+                token = token[: -len(suffix)] + replacement
+                break
     if len(token) <= 4:
         return token
-    for suffix, replacement in (
-        ("ization", "ize"),
-        ("ational", "ate"),
-        ("ation", "ate"),
-        ("iveness", "ive"),
-        ("fulness", "ful"),
-        ("ousness", "ous"),
-        ("ically", "ic"),
-        ("ing", ""),
-        ("edly", ""),
-        ("ed", ""),
-        ("ers", ""),
-        ("er", ""),
-        ("ies", "y"),
-        ("s", ""),
-    ):
+    for suffix, replacement in _DERIVATIONAL_RULES:
         if token.endswith(suffix) and len(token) - len(suffix) >= 3:
             return token[: -len(suffix)] + replacement
     return token
@@ -69,14 +95,60 @@ def tokens(text: str) -> set[str]:
     }
 
 
-def evidence_score(query: str, text: str, evidence_type: EvidenceType, evidence_level: str | None = None) -> float:
+def build_corpus_idf(documents: list[str]) -> dict[str, float]:
+    """Vypočíta váhu termínov podľa ich vzácnosti v množine kandidátov.
+
+    Bez tejto váhy má každý termín dotazu rovnakú dôležitosť, takže dokument
+    z úplne inej domény prejde len vďaka zdieľanej generickej slovnej zásobe
+    (napríklad "machine", "learning", "real", "time", "detection"). Termíny,
+    ktoré sa vyskytujú takmer vo všetkých kandidátoch, nenesú rozlišovaciu
+    informáciu a dostávajú nižšiu váhu; vzácne doménové termíny vyššiu.
+
+    Zámerne sa počíta nad práve získanou množinou kandidátov, nie nad pevným
+    zoznamom slov — systém tak zostáva bez zabudovaných doménových slovníkov
+    a prispôsobí sa ľubovoľnej téme dotazu.
+    """
+    doc_token_sets = [tokens(document) for document in documents if (document or "").strip()]
+    total = len(doc_token_sets)
+    if total < _MIN_CORPUS_FOR_IDF:
+        return {}
+    document_frequency: dict[str, int] = {}
+    for token_set in doc_token_sets:
+        for token in token_set:
+            document_frequency[token] = document_frequency.get(token, 0) + 1
+    return {
+        token: math.log(1.0 + total / (1.0 + frequency))
+        for token, frequency in document_frequency.items()
+    }
+
+
+def _weighted_overlap_ratio(
+    query_tokens: set[str], overlap: set[str], idf: dict[str, float] | None
+) -> float:
+    """Určí podiel pokrytia dotazu, prípadne vážený vzácnosťou termínov."""
+    if not idf:
+        return len(overlap) / len(query_tokens)
+    total_weight = sum(idf.get(token, _DEFAULT_IDF_WEIGHT) for token in query_tokens)
+    if total_weight <= 0:
+        return len(overlap) / len(query_tokens)
+    matched_weight = sum(idf.get(token, _DEFAULT_IDF_WEIGHT) for token in overlap)
+    return matched_weight / total_weight
+
+
+def evidence_score(
+    query: str,
+    text: str,
+    evidence_type: EvidenceType,
+    evidence_level: str | None = None,
+    idf: dict[str, float] | None = None,
+) -> float:
     """Vypočíta orientačné skóre relevancie textu voči dotazu."""
     query_tokens = tokens(query)
     text_tokens = tokens(text)
     if not query_tokens or not text_tokens:
         return 0.0
     overlap = query_tokens & text_tokens
-    score = (len(overlap) / len(query_tokens)) * 8.0
+    score = _weighted_overlap_ratio(query_tokens, overlap, idf) * 8.0
     if evidence_type == "PATENT" and text_tokens & PATENT_STRUCTURAL:
         score += 0.5
     elif evidence_type == "PUBLICATION" and text_tokens & PUBLICATION_STRUCTURAL:
@@ -120,11 +192,31 @@ def subject_anchors(query_terms: set[str]) -> set[str]:
     return {token for token in query_terms if not _strip_mechanism(token)}
 
 
-def is_relevant(query: str, text: str, evidence_type: EvidenceType, threshold: float | None = None) -> bool:
+def salient_query_tokens(query: str, idf: dict[str, float], top_n: int = 6) -> set[str]:
+    """Vyberie najrozlišujúcejšie termíny dotazu podľa ich vzácnosti v korpuse.
+
+    Slúži ako doménová kotva: dokument, ktorý neobsahuje ani jeden z termínov
+    najviac špecifických pre daný dotaz, je tematicky inde, aj keď zdieľa
+    generickú metodickú slovnú zásobu.
+    """
+    candidates = discriminative_tokens(query) or tokens(query)
+    if not idf or not candidates:
+        return set()
+    ranked = sorted(candidates, key=lambda token: idf.get(token, _DEFAULT_IDF_WEIGHT), reverse=True)
+    return set(ranked[: max(1, top_n)])
+
+
+def is_relevant(
+    query: str,
+    text: str,
+    evidence_type: EvidenceType,
+    threshold: float | None = None,
+    idf: dict[str, float] | None = None,
+) -> bool:
     """Overí, či text spĺňa minimálnu hranicu relevancie voči dotazu."""
+    text_tokens = tokens(text)
     if evidence_type == "PUBLICATION":
         query_tokens = tokens(query)
-        text_tokens = tokens(text)
         shared = query_tokens & text_tokens
         required_shared = 2
         if len(query_tokens) >= 6:
@@ -142,4 +234,10 @@ def is_relevant(query: str, text: str, evidence_type: EvidenceType, threshold: f
             return False
         if not product_anchors and discriminators and not (discriminators & text_tokens):
             return False
-    return evidence_score(query, text, evidence_type) >= (threshold if threshold is not None else THRESHOLDS[evidence_type])
+    if idf:
+        salient = salient_query_tokens(query, idf)
+        if salient and not (salient & text_tokens):
+            return False
+    return evidence_score(query, text, evidence_type, idf=idf) >= (
+        threshold if threshold is not None else THRESHOLDS[evidence_type]
+    )

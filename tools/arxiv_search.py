@@ -18,7 +18,8 @@ def _run_search(query: str, max_results: int) -> list[arxiv.Result]:
         max_results=max_results,
         sort_by=arxiv.SortCriterion.Relevance,
     )
-    return list(search.results())
+    client = arxiv.Client(page_size=max(1, min(max_results, 100)), num_retries=2)
+    return list(client.results(search))
 
 
 async def arxiv_search(query: str, max_results: int = 5) -> str:
@@ -37,12 +38,13 @@ async def arxiv_search(query: str, max_results: int = 5) -> str:
             blocks.append(
                 "\n".join(
                     [
-                        f"Paper title from ArXiv: **{paper.title.strip()}**.",
-                        f"Authors listed on the paper record: {authors}.",
-                        f"Publication year reported by ArXiv: {paper.published.year}.",
-                        f"Paper landing page on ArXiv: {paper.entry_id}.",
+                        f"Publication title returned by ArXiv: **{paper.title.strip()}**.",
+                        f"Publication year returned by ArXiv: {paper.published.year}.",
+                        f"Authors listed for this publication result: {authors}.",
+                        f"Abstract excerpt from this publication record: {abstract}",
+                        f"ArXiv URL for this publication: {paper.entry_id}.",
                         f"Direct PDF download link for the paper: {paper.pdf_url}.",
-                        f"Abstract excerpt from the paper record: {abstract}",
+                        "SOURCE: ArXiv",
                     ]
                 )
             )

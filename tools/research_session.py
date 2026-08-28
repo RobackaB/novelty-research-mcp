@@ -10,21 +10,24 @@ import re
 import sqlite3
 import unicodedata
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
-LOGGER = logging.getLogger(__name__)
 
 from .evidence_quality import grade_source, hit_quality_score
 from .final_answer_pack import final_answer_pack
 from .merge_evidence_pack import merge_evidence_pack
 from .patent_evidence_pack import patent_evidence_pack
 from .publication_evidence_pack import publication_evidence_pack
+from .query_expansion import applicable_synonyms, synonym_query_variants
 from .query_normalize import clean_tool_query
 from .relevance import discriminative_tokens
 from .user_answer import build_user_answer_payload
 from .web_evidence_pack import web_evidence_pack
+
+LOGGER = logging.getLogger(__name__)
 
 SOURCE_TYPES = ("patent", "publication", "web")
 SOURCE_TO_MERGED_KEY = {
@@ -84,7 +87,7 @@ def _db_path() -> Path:
     return Path(__file__).resolve().parent.parent / "data" / "research_sessions.sqlite3"
 
 
-def _connect() -> sqlite3.Connection:
+def _open_connection() -> sqlite3.Connection:
     """Otvorí SQLite pripojenie a pripraví schému databázy."""
     path = _db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,6 +98,17 @@ def _connect() -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=5000")
     _ensure_schema(conn)
     return conn
+
+
+@contextmanager
+def _connect() -> Iterator[sqlite3.Connection]:
+    """Poskytne SQLite pripojenie s transakciou a po použití ho vždy zavrie."""
+    conn = _open_connection()
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -379,6 +393,14 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Bezpečne prevedie hodnotu na desatinné číslo s predvolenou hodnotou."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _as_list(value: Any) -> list[Any]:
     """Vráti hodnotu ako zoznam, alebo prázdny zoznam pri inom type."""
     return value if isinstance(value, list) else []
@@ -412,6 +434,17 @@ def _safe_json_loads(value: Any, default: Any = None) -> Any:
 def _compact_warnings(warnings: list[Any], limit: int = 3) -> list[str]:
     """Skráti zoznam varovaní na stručné texty pre logovanie."""
     return [re.sub(r"\s+", " ", str(item)).strip()[:240] for item in warnings[:limit] if item]
+
+
+def _truncated_warnings(warnings: list[Any]) -> list[str]:
+    """Skráti text každého varovania bez obmedzenia ich počtu.
+
+    Používa sa v ACK odpovediach namiesto surových varovaní, ktoré môžu
+    obsahovať úryvky zo zlyhaného fetchu (napr. časť naškrábanej stránky) —
+    supervisor má podľa promptu vidieť len krátke kontrolné polia, takže
+    dlhý surový text sa sem nemá dostať ani ako "vedľajší" údaj.
+    """
+    return [re.sub(r"\s+", " ", str(item)).strip()[:240] for item in warnings if item]
 
 
 def _record_trace(
@@ -525,15 +558,11 @@ _STATUS_RANK = {
 
 def _row_quality_key(row: sqlite3.Row, source_type: str) -> tuple[int, int, float, int]:
     """Vypočíta porovnávací kľúč kvality uloženého pokusu."""
-    grade = str(row["quality_grade"] or "").strip()
-    if not grade:
-        normalized = _safe_json_loads(row["normalized_json"], {}) or {}
-        graded = grade_source(normalized if isinstance(normalized, dict) else None, source_type)
-        grade = str(graded.get("quality_grade") or "missing")
-    status = str(row["status"] or "failed")
     normalized = _safe_json_loads(row["normalized_json"], {}) or {}
     graded = grade_source(normalized if isinstance(normalized, dict) else None, source_type)
-    top_hit_quality = float(graded.get("top_hit_quality", 0.0) or 0.0)
+    grade = str(row["quality_grade"] or "").strip() or str(graded.get("quality_grade") or "missing")
+    status = str(row["status"] or "failed")
+    top_hit_quality = _safe_float(graded.get("top_hit_quality", 0.0) or 0.0)
     attempt = int(row["attempt"] or 0)
     return (
         _QUALITY_GRADE_RANK.get(grade, -1),
@@ -655,7 +684,7 @@ def _budget_exceeded_sources(
         SELECT source_type, MAX(attempt) AS rejected_attempt
         FROM trace_events
         WHERE session_id=? AND status='attempt_budget_exceeded'
-          AND source_type IS NOT NULL
+          AND source_type != ''
         GROUP BY source_type
         """,
         (session_id,),
@@ -840,6 +869,9 @@ def _web_query_variants(
         out.append(_compact_query_text(f"{core} {_WEB_INTENT_TERMS[0]}", 10))
     return [variant for variant in dict.fromkeys(out) if variant][:7]
 
+_LOW_PRIORITY_TAIL_CATEGORY = "object_or_form_factor"
+
+
 def _query_variants_from_atoms(clean_query: str, key_terms: list[str], atomic: list[dict[str, Any]]) -> list[str]:
     """Vytvorí vyhľadávacie varianty z atomických požiadaviek dotazu."""
     labels = [
@@ -861,7 +893,22 @@ def _query_variants_from_atoms(clean_query: str, key_terms: list[str], atomic: l
         core = labels[0]
 
     full_atom_variant = _compact_query_text(" ".join(labels), 32)
-    tail_labels = labels[max(1, len(labels) // 2):]
+    # Zoradí ostatné požiadavky tak, aby konkrétnejšie kategórie (funkcia,
+    # mechanizmus, obmedzenie) predchádzali všeobecnejším (predmet/forma) —
+    # ak sa dotaz musí orezať na limit tokenov, zahodia sa najprv menej
+    # rozlišujúce prvky, nie ľubovoľné podľa pozície v dotaze.
+    other_atoms = [
+        atom
+        for atom in atomic
+        if isinstance(atom, dict) and str(atom.get("label") or "").strip() != core
+    ]
+    prioritized_other_atoms = sorted(
+        other_atoms,
+        key=lambda atom: 1 if atom.get("category") == _LOW_PRIORITY_TAIL_CATEGORY else 0,
+    )
+    tail_labels = [
+        re.sub(r"\s+", " ", str(atom.get("label") or "")).strip() for atom in prioritized_other_atoms
+    ]
     tail_variant = _compact_query_text(" ".join([core, *tail_labels]), 24)
     return [
         variant
@@ -1467,6 +1514,13 @@ def _build_query_envelope(original_query: str, english_query: str = "") -> dict[
         key_terms,
         facets.get("critical_requirements_atomic", []),
     )
+    synonyms = applicable_synonyms(analysis_query)
+    expansion_variants = synonym_query_variants(analysis_query, max_variants=2)
+    source_variants = [
+        variant
+        for variant in dict.fromkeys([*variants[:3], *expansion_variants])
+        if variant
+    ][:5]
     analysis_atoms = facets.get("critical_requirements_atomic", []) or []
     display_atoms = display_facets.get("critical_requirements_atomic", []) or []
     atoms = _merge_display_labels(analysis_atoms, display_atoms) if clean_english else analysis_atoms
@@ -1497,12 +1551,21 @@ def _build_query_envelope(original_query: str, english_query: str = "") -> dict[
         "critical_requirements_atomic": atoms,
         "optional_requirements": [],
         "negative_requirements": facets["negative_requirements"],
-        "synonyms": [],
+        "synonyms": synonyms,
         "exact_combination_criteria": facets["critical_requirements"],
         "query_variants": {
-            "patent": variants[:3],
-            "publication": variants[:3],
-            "web": _web_query_variants(variants, facets.get("core_subject") or "", atoms),
+            "patent": source_variants,
+            "publication": source_variants,
+            "web": [
+                variant
+                for variant in dict.fromkeys(
+                    [
+                        *_web_query_variants(variants, facets.get("core_subject") or "", atoms),
+                        *expansion_variants,
+                    ]
+                )
+                if variant
+            ][:7],
         },
         "query_too_generic": query_too_generic,
         "notes": [
@@ -1609,7 +1672,7 @@ def _error_ack(
         "compact_warnings": _compact_warnings([message]),
         "schema_valid": True,
         "was_duplicate_call": False,
-        "warnings": [message],
+        "warnings": _truncated_warnings([message]),
         **diag,
     }
     if expected_source_type:
@@ -1954,7 +2017,7 @@ def _insert_raw_items(
                 str(hit.get("url") or hit.get("final_url") or "")[:1000],
                 _as_bool_int(hit.get("verified_url")),
                 str(hit.get("evidence_level") or "unverified")[:80],
-                float(hit.get("relevance_score") or hit.get("score") or 0),
+                _safe_float(hit.get("relevance_score") or hit.get("score") or 0),
                 hit_quality_score(hit, source_type),
                 str(hit.get("provider") or "")[:120],
                 attempt_log_json[:4000],
@@ -2132,7 +2195,7 @@ def research_session_save_evidence(
             "error_count": len(errors),
             "compact_warnings": _compact_warnings(warnings),
             "schema_valid": True,
-            "warnings": warnings,
+            "warnings": _truncated_warnings(warnings),
             **_english_query_diagnostics(clean_source, english_query),
         }
     )
@@ -2703,7 +2766,6 @@ def research_session_checklist(
             "all_sources_present": all_sources_present,
             "all_reliable_no_results": all_reliable_no_results,
             "source_checks": source_checks,
-            "recommended_next_actions": actions,
             "supervisor_instruction": (
                 "Call the recommended evidence_to_session tools, then call research_session_checklist again."
                 if needs_loop
@@ -2716,7 +2778,7 @@ def research_session_plan_next(session_id: str) -> str:
     """Vráti návrhy ďalších vyhľadávacích krokov podľa stavu prieskumu."""
     clean_id = _clean_session_id(session_id)
     checklist = json.loads(research_session_checklist(clean_id))
-    actions = checklist.get("recommended_next_actions") if isinstance(checklist, dict) else []
+    actions = checklist.get("retry_actions") if isinstance(checklist, dict) else []
     with _connect() as conn:
         session = _session_row(conn, clean_id)
         original_query = str(session["original_query"] or "") if session else ""
@@ -2989,6 +3051,25 @@ def research_session_user_answer(
         return _json(payload)
     return str(payload.get("user_answer") or "")
 
+def _load_atomic_requirements(session_id: str) -> list[dict[str, Any]] | None:
+    """Načíta atomické požiadavky z uloženého query envelope danej session."""
+    try:
+        with _connect() as conn:
+            session = _session_row(conn, _clean_session_id(session_id))
+            if session is None:
+                return None
+            envelope = _safe_json_loads(session["query_envelope_json"], {}) or {}
+            if not isinstance(envelope, dict):
+                return None
+            raw_atomic = envelope.get("critical_requirements_atomic") or []
+            if not isinstance(raw_atomic, list):
+                return None
+            atoms = [atom for atom in raw_atomic if isinstance(atom, dict)]
+            return atoms or None
+    except Exception:
+        return None
+
+
 def _envelope_query_too_generic(session_id: str) -> bool:
     """Skontroluje, či query envelope považuje dotaz za príliš všeobecný."""
     try:
@@ -3073,18 +3154,7 @@ async def patent_evidence_to_session(
             agent_name="patent_sqlite_writer_agent",
             english_query=english_query_clean,
         )
-    atomic_requirements: list[dict[str, Any]] | None = None
-    try:
-        with _connect() as _ar_conn:
-            _ar_session = _session_row(_ar_conn, _clean_session_id(session_id))
-            if _ar_session is not None:
-                _ar_envelope = _safe_json_loads(_ar_session["query_envelope_json"], {}) or {}
-                if isinstance(_ar_envelope, dict):
-                    _raw_atomic = _ar_envelope.get("critical_requirements_atomic") or []
-                    if isinstance(_raw_atomic, list):
-                        atomic_requirements = [a for a in _raw_atomic if isinstance(a, dict)]
-    except Exception:
-        atomic_requirements = None
+    atomic_requirements = _load_atomic_requirements(session_id)
     try:
         evidence = await patent_evidence_pack(
             query=clean_query,
@@ -3149,6 +3219,7 @@ async def publication_evidence_to_session(
             agent_name="publication_sqlite_writer_agent",
             english_query=english_query_clean,
         )
+    atomic_requirements = _load_atomic_requirements(session_id)
     try:
         evidence = await publication_evidence_pack(
             query=clean_query,
@@ -3156,6 +3227,7 @@ async def publication_evidence_to_session(
             max_fetches=max_fetches,
             fetch_timeout_s=fetch_timeout_s,
             english_query=english_query_clean,
+            atomic_requirements=atomic_requirements,
         )
     except TimeoutError as exc:
         return research_session_record_failure(session_id, "publication", clean_query, "timeout", "timeout", str(exc), int(begin["attempt"]), run_id, "publication_sqlite_writer_agent", english_query_clean)
@@ -3212,6 +3284,7 @@ async def web_evidence_to_session(
             agent_name="web_sqlite_writer_agent",
             english_query=english_query_clean,
         )
+    atomic_requirements = _load_atomic_requirements(session_id)
     try:
         evidence = await web_evidence_pack(
             query=clean_query,
@@ -3219,6 +3292,7 @@ async def web_evidence_to_session(
             max_fetches=max_fetches,
             timeout_ms=timeout_ms,
             english_query=english_query_clean,
+            atomic_requirements=atomic_requirements,
         )
     except TimeoutError as exc:
         return research_session_record_failure(session_id, "web", clean_query, "timeout", "timeout", str(exc), int(begin["attempt"]), run_id, "web_sqlite_writer_agent", english_query_clean)

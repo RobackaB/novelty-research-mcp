@@ -10,7 +10,8 @@ services:
     volumes:
       - flowise_data:/root/.flowise
     depends_on:
-      - mcp-research-server
+      mcp-research-server:
+        condition: service_healthy
     restart: unless-stopped
 
   mcp-research-server:
@@ -28,8 +29,18 @@ services:
       EXA_API_KEY: ${EXA_API_KEY:-}
       GOOGLE_CSE_API_KEY: ${GOOGLE_CSE_API_KEY:-}
       GOOGLE_CSE_ID: ${GOOGLE_CSE_ID:-}
+      PUBMED_API_KEY: ${PUBMED_API_KEY:-}
+      ALPHAXIV_API_KEY: ${ALPHAXIV_API_KEY:-}
+      JINA_API_KEY: ${JINA_API_KEY:-}
+      UNPAYWALL_EMAIL: ${UNPAYWALL_EMAIL:-}
     volumes:
       - mcp_research_data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), timeout=3).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     restart: unless-stopped
 
 volumes:

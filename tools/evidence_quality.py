@@ -107,7 +107,6 @@ def grade_source(source: dict[str, Any] | None, source_type: str = "") -> dict[s
     scored_hits = sorted(((hit_quality_score(hit, source_type), hit) for hit in hits), reverse=True, key=lambda item: item[0])
     top_score, top_hit = scored_hits[0]
     levels = {str(hit.get("evidence_level") or "unverified").strip().lower() for hit in hits}
-    non_generic_hits = [hit for hit in hits if not _is_generic(hit)]
     strong_hit = any(
         str(hit.get("evidence_level") or "").strip().lower() in STRONG_EVIDENCE_LEVELS and not _is_generic(hit)
         for hit in hits
@@ -129,8 +128,6 @@ def grade_source(source: dict[str, Any] | None, source_type: str = "") -> dict[s
         grade = "medium"
     elif levels and levels <= FAILED_EVIDENCE_LEVELS:
         grade = "failed_retrieval"
-    elif non_generic_hits:
-        grade = "weak"
     else:
         grade = "weak"
 

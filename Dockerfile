@@ -24,4 +24,7 @@ ENV RESEARCH_SESSION_DB=/app/data/research_sessions.sqlite3
 
 EXPOSE 8000
 
+HEALTHCHECK --interval=10s --timeout=5s --retries=5 --start-period=15s \
+    CMD python -c "import socket; socket.create_connection(('127.0.0.1', 8000), timeout=3).close()"
+
 CMD ["python", "server_http.py"]
