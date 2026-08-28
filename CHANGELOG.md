@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Every release keeps the 7 MCP tool interfaces (names, parameters, response shape)
 compatible with the exported Flowise architecture.
 
+## [0.9.3] Dependency compatibility
+
+### Fixed
+
+- The `mcp` dependency was declared as `>=1.0.0`, so a clean install picked up the 2.x line, which is a breaking release: `mcp.server.fastmcp` no longer exists and `streamablehttp_client` was renamed to `streamable_http_client`. Continuous integration caught this on a fresh environment even though local installs worked. The requirement is now `>=1.9.0,<2`, matching the API the project is written against.
+- The AlphaXiv Streamable HTTP client is resolved at call time and accepts either function name, so an optional transport can never break the package import.
+
 ## [0.9.2] Patent result quality under provider blocking
 
 ### Fixed

@@ -17,10 +17,25 @@ import os
 from typing import Any
 
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
 from mcp.types import CallToolResult
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _streamable_http_client():
+    """Vráti klienta Streamable HTTP transportu naprieč verziami balíka mcp.
+
+    Funkcia sa vo verzii 2.0 premenovala z `streamablehttp_client` na
+    `streamable_http_client`. Import prebieha až pri volaní, takže nedostupnosť
+    tohto voliteľného transportu nikdy nezhodí import celého balíka.
+    """
+    from mcp.client import streamable_http as transport
+
+    for name in ("streamable_http_client", "streamablehttp_client"):
+        client = getattr(transport, name, None)
+        if client is not None:
+            return client
+    raise ImportError("Streamable HTTP client is not available in the installed mcp package.")
 
 ALPHAXIV_MCP_URL = "https://api.alphaxiv.org/mcp/v1"
 ALPHAXIV_TIMEOUT_S = 25.0
@@ -103,7 +118,7 @@ async def discover_papers(query: str, timeout_s: float = ALPHAXIV_TIMEOUT_S) -> 
         return []
 
     async def _run() -> list[Any]:
-        async with streamablehttp_client(
+        async with _streamable_http_client()(
             ALPHAXIV_MCP_URL, headers={"Authorization": f"Bearer {api_key}"}
         ) as (read_stream, write_stream, _get_session_id):
             async with ClientSession(read_stream, write_stream) as session:
