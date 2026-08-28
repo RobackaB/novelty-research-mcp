@@ -1,0 +1,127 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+Every release keeps the 7 MCP tool interfaces (names, parameters, response shape)
+compatible with the exported Flowise architecture.
+
+## [0.9.2] Patent result quality under provider blocking
+
+### Fixed
+
+- WIPO PATENTSCOPE result rows were passed on as evidence snippets including the full international patent classification text. Its generic wording (`recognising patterns`, `computing`, `data`) produced false relevance matches, which put unrelated patents such as image-comparison filings into a log-anomaly report. Classification and form fields are now stripped; if nothing substantive remains, no snippet is produced and relevance is judged from the title alone.
+- The low-confidence fallback returned every candidate, including ones scoring 0.0. A minimum relevance floor now applies, so an incomplete result is reported honestly instead of listing clearly unrelated patents.
+
+### Changed
+
+- The keyless Google Patents provider is documented as best-effort: it returns HTTP 503 under the same anti-automation protection that affects patent detail pages, so patent search may fall back to other providers.
+
+## [0.9.0] Measurable relevance and output quality
+
+### Added
+
+- Offline evaluation harness in `eval/` with a gold-standard dataset of three scenarios, one taken verbatim from a real production run. Reports precision, recall, F1, P@k, MAP and MRR; run with `python -m eval.relevance_eval`.
+- Corpus-level IDF term weighting (`build_corpus_idf()`) applied as a second pass over the merged candidate set, plus a `salient_query_tokens()` domain anchor. Weights come from the retrieved candidates, so no hardcoded domain vocabulary is introduced.
+- IDF reranking wired into publication search, web search and patent ranking, with a guard so stricter filtering can never empty a whole source.
+- Quality regression tests that fail if precision drops below the measured level or if IDF stops outperforming uniform term weights.
+- Text cleaning helpers in `tools/output_cleaner.py`: `unescape_entities()`, `collapse_repeats()`, `strip_boilerplate()` and `strip_leading_title()`.
+
+### Fixed
+
+- Stemmer never matched singular against plural ("logs" vs. "log", "application" vs. "applications"), so a document about log analysis scored zero credit against a query about logs. Plural stripping now runs first, the guard length dropped to 3, and words ending in "ss" are protected.
+- Reports no longer carry undecoded HTML entities, README markdown headings, repository metadata, site navigation or marketing calls to action into finding summaries.
+
+### Changed
+
+- Offline dataset: precision 0.486 → 0.667 (+37 %), F1 0.600 → 0.733 (+22 %), recall unchanged at 0.833. Real-run scenario alone: precision 0.12 → 0.33, F1 0.20 → 0.40.
+- Live run on the original query: 5 off-topic results (seismology, ionosphere, GNSS, firefighting robot, social networks) → 0, papers actually about logs 2 → 3, with 19 candidates filtered out.
+- A summary is shown only if it contains at least one query term; the finding, its URL and its evidence level stay visible either way.
+- Test suite grew from 229 to 258 tests.
+- Known measured limit: P@2 in the real-run scenario stays at 0.00, because a purely lexical method cannot separate documents that share nearly the whole query vocabulary but differ in subject.
+
+## [0.8.0] Patent full-text retrieval
+
+### Added
+
+- PDF-first patent fetching. The official patent PDF on `patentimages.storage.googleapis.com` is tried before the HTML page, and that host is not covered by the bot protection that blocks `patents.google.com`.
+- Patent metadata (`assignee`, `filing_date`, `grant_date`) and the PDF path are read from the Google Patents XHR response instead of being scraped from HTML, where they came back as `Unknown`.
+- Explicit `STATUS: BLOCKED` / `EVIDENCE_LEVEL: FETCH_BLOCKED` state with a `BotBlockedError` class, plus a best-effort Wayback Machine fallback.
+- `JINA_API_KEY` support for Jina Reader, sent as an `Authorization: Bearer` header, removing anonymous-tier `403` failures on DOI verification.
+- Unpaywall resolution of open-access DOIs to a direct PDF link, so journal publications get full-text analysis and not only arXiv and direct `.pdf` URLs.
+
+### Fixed
+
+- Google Patents answered automated requests with HTTP 503, so claim coverage, description extraction and exact-combination detection never ran for any patent. Concurrent requests to that host are now capped at 2 by a semaphore, and the block is reported honestly instead of as a parse failure.
+- `web_evidence_pack` now parses `ERROR: type - message` markers from the search output, so the real provider error reaches the caller instead of a generic "see server logs".
+- Query variant selection truncated atoms by position; more specific categories (function, mechanism, constraint) now take precedence over generic ones when trimming to the token limit.
+- Writer ACKs duplicated full warning text next to the compact form, and the checklist returned the same retry list under two keys. Warnings are truncated to 240 characters per item and the duplicate key was removed.
+
+### Changed
+
+- Measured on the same query as the production run: patent evidence level 5× snippet-only → 3× claim-verified plus 1× abstract-verified, claim coverage always 0 → up to 1.0, extracted text per patent 0 → 7706 words (US10831585B2), single fetch 15198 ms → 737 ms (roughly 20× faster).
+- Text from two-column patent PDFs feeds element coverage only; `CLAIM1` and `ABSTRACT` keep their "not found" sentinels rather than quoting interleaved column text as if it were a verbatim claim.
+- `patent_fetch` gained a `pdf_url` parameter (deliberate signature change).
+- Test suite grew from 217 to 229 tests.
+
+## [0.5.0] Deeper source analysis
+
+### Added
+
+- `tools/pdf_fetch.py`: PDF sources (datasheets, manuals, papers) are downloaded with a 15 MB limit and text-extracted from the first 25 pages instead of being kept as snippet-only evidence. Verified live on an arXiv PDF at 6123 extracted words.
+- `tools/requirement_match.py`: stem-aware requirement matching shared by all three evidence packs and the report; the patent pack previously used naive substring matching.
+- `tools/query_expansion.py`: deterministic synonym and acronym expansion (IoT, ML, anomaly/outlier, predictive/condition-based, and similar), so retries search a genuinely different result space and the `synonyms` envelope field is no longer always empty.
+- Key-free Google Patents provider using the native `patents.google.com/xhr/query` JSON interface. Live test returned 5 relevant patents (US, EP, CN) with no API keys configured at all.
+- arXiv promoted from emergency fallback to a full parallel publication provider with standard block format and a 0.9 quality multiplier.
+- Real AlphaXiv MCP integration in `tools/alphaxiv_client.py` against `https://api.alphaxiv.org/mcp/v1` with `ALPHAXIV_API_KEY`, replacing an assumed local `alpha` CLI that never existed. Tested over the real MCP protocol through an in-memory FastMCP server.
+- Full patent claims and description sections (`CLAIMS_TEXT` up to 1200 words, `DESCRIPTION_TEXT` up to 1500 words) instead of claim 1 and the abstract only.
+- `COVERAGE_TOKENS`: deduplicated tokens of the whole extracted page or PDF (cap 2500), so element coverage sees the entire document rather than a query-focused condensation.
+- Full-text PDF analysis for open-access publications with `fulltext_analyzed` and `fulltext_word_count`; a successful full-text read can raise the evidence level to `fetched_excerpt`.
+- Cross-source corroboration: the same document (patent number, DOI or URL) confirmed independently by several source types is marked in the report and exposed as `corroborated_documents`.
+- Query-focused abstract excerpts for all publication providers, replacing a fixed cut at the first 60 words.
+- Deeper web fetch: an `ANALYSIS` field with up to 900 words from the 24 most relevant sentences, used for scoring and coverage while the displayed summary stays short.
+
+### Fixed
+
+- `exact_combination_candidate_found` was never set by any code path, making the `exact_match` verdict and the `exact_combination_found` stop reason dead functionality. Every hit now carries `atom_coverage` and `atom_match_count`, and full coverage by a verified document propagates through SQLite into the checklist and the verdict.
+- Stemmer defect where "codes" stemmed to "cod" but "code" to "code", so singular and plural never matched.
+
+### Changed
+
+- Atomic requirements are handed to all three writers, not just the patent one.
+- Relevance is upgraded to `direct`/`focused` at 50 % element coverage or higher, and the report shows element coverage for every finding.
+- `ALPHA_CLI_PATH` replaced by `ALPHAXIV_API_KEY` in `.env.example` and `docker-compose.yml`; the startup banner now tracks `ALPHAXIV_API_KEY` and `PUBMED_API_KEY`.
+- Test suite grew from 126 to 189 tests.
+
+## [0.2.0] Correctness fixes and test suite
+
+### Added
+
+- First test suite: 126 tests across 14 files, all offline with the network stubbed. Install with `pip install -e .[dev]` and run `python -m pytest`.
+- `tools/_ttl_cache.py` with a TTL and an entry cap (64 for search, 256 for fetch) plus LRU-style eviction, replacing unbounded in-memory dictionaries.
+- Packaging fixes in `pyproject.toml`: `server_http` and `terminal_ui` added to `py-modules` (previously `pip install .` omitted the HTTP entry point), a `mcp-research-server-http` script, a `dev` extra and pytest configuration.
+- Healthcheck for the MCP server in `docker-compose.yml` and `Dockerfile`; Flowise now waits for `condition: service_healthy` before starting.
+- `.env.example` completed with every variable the code actually reads (`PUBMED_API_KEY`, `FLOWISE_USERNAME`/`PASSWORD`, `MCP_HOST`/`PORT`/`PATH`, `MCP_ALLOWED_HOSTS`/`ORIGINS`, `RESEARCH_SESSION_DB`, UI switches).
+
+### Fixed
+
+- The OpenAlex provider never returned anything: an invalid `authors_count` field in `select` made every call fail with HTTP 400 and the exception was swallowed silently. Verified against the live API before (400) and after (200).
+- Requirement coverage fallback compared a count against an index, so the report could claim a source verified a requirement it never touched; it also used label keys that did not exist, leaking English phrases into the Slovak report.
+- SQLite connections were never closed, since `with _connect() as conn` only commits or rolls back. Every tool call leaked a handle and kept database files locked on Windows.
+- Deprecated arXiv `Search.results()` replaced with `arxiv.Client(...).results(search)` with bounded `page_size` and retry.
+- Startup banner advertised four tools the server does not register; it now prints exactly the 7 registered MCP tools, checked by a test against the real registration.
+- A non-numeric `relevance_score` from a provider crashed the entire evidence write; added a `_safe_float` helper.
+- Playwright was imported at module level, so the `tools` package, the server and the tests could not be imported without it. It is now a lazy import with a fallback timeout class.
+- Dead and unreachable code removed in `evidence_quality.py`, `patent_search.py` and `web_evidence_pack.py`; the `non_english` envelope value now maps directly to Slovak output.
+
+## [1.0-thesis] Initial bachelor's thesis submission
+
+Baseline state of the project as submitted, roughly 6700 lines of Python.
+
+- 7 MCP tools covering patents, publications and web search in a single workflow.
+- Persistent session state in SQLite with retry budgets, a checklist and evidence-level grading.
+- Deterministic server side: query understanding, relevance scoring and report rendering use no LLM inside the MCP server.
+- Orchestration through Flowise, with the architecture exported to `flowise_architecture/Flowise_agent.json`.
+- No automated tests.

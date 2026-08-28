@@ -1,5 +1,9 @@
 # Novelty Research MCP
 
+[![tests](https://github.com/RobackaB/novelty-research-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/RobackaB/novelty-research-mcp/actions/workflows/tests.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
+
 An MCP server for **source-grounded prior-art and novelty research**. Given a plain-language
 description of an invention, it searches patents, scientific publications and the web in one
 run, verifies what each source actually supports, and returns a report with an explicit
@@ -157,6 +161,25 @@ This keeps the data. To remove the volumes as well:
 docker compose down -v
 ```
 
+## Development
+
+The test suite needs no network access and no API keys:
+
+```bash
+pip install -e ".[dev]"
+python -m pytest
+```
+
+Relevance quality is measured against a gold-standard dataset in `eval/`, scored with
+precision, recall, F1, P@k, MAP and MRR. The harness runs offline, so results are
+reproducible:
+
+```bash
+python -m eval.relevance_eval
+```
+
+`AUDIT.md` records what each change measured before and after.
+
 ## Repository contents
 
 | Path | Contents |
@@ -167,6 +190,9 @@ docker compose down -v
 | `flowise_architecture/` | The Flowise architecture to import |
 | `flowise_baselines/` | Simpler RAG architectures, used only for comparison |
 | `terminal_ui.py` | Startup banner for the HTTP server |
+| `tests/` | Test suite, no network access required |
+| `eval/` | Relevance evaluation harness and gold-standard dataset |
+| `AUDIT.md` | Measured findings behind each change |
 
 ## About this repository
 
