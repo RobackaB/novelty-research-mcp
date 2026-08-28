@@ -1,0 +1,134 @@
+{
+  "schema": "relevance-eval.v1",
+  "description": "Gold-standard dataset na meranie kvality hodnotenia relevancie. Kandidáti v scenári 'anomaly_logs_real_run' pochádzajú z reálneho behu systému vo Flowise (24. 7. 2026) a ich znenie je prevzaté z výstupu bez úprav. Ostatné scenáre zodpovedajú demonštračným príkladom z obhajoby a ich kandidáti sú zostavení tak, aby obsahovali doménovo relevantné aj generickou slovnou zásobou podobné dokumenty.",
+  "labels": {
+    "1": "doménovo relevantný: rieši rovnaký predmet aj úlohu ako dotaz",
+    "0": "nerelevantný: zdieľa iba generickú slovnú zásobu (metóda, technológia), iná doména"
+  },
+  "queries": [
+    {
+      "id": "anomaly_logs_real_run",
+      "provenance": "real_production_run",
+      "source_type": "publication",
+      "query": "system for detecting anomalies in application logs processes events in real time machine learning to recognize unusual patterns automatically creates incident notifies administrator",
+      "candidates": [
+        {
+          "label": 1,
+          "title": "Detecting System Anomalies without Labels using Workflow Patterns in Logs",
+          "text": "Large software systems create many logs. Logs record what happens inside the system. Hand-reading all logs is hard in large systems. It finds mathematical patterns from logs. These patterns show the way events in the system relate to each other. ADR found useful patterns and detected many problems in the logs."
+        },
+        {
+          "label": 1,
+          "title": "A DEEP LEARNING APPROACH FOR DETECTING ANOMALIES IN DISTRIBUTED SYSTEM LOGS",
+          "text": "This paper presents a deep learning-based approach for detecting anomalies in distributed system logs, addressing the challenges posed by the increasing complexity and volume of log data generated in modern computing environments."
+        },
+        {
+          "label": 0,
+          "title": "Real-time classification of Irish seismic events using supervised machine learning",
+          "text": "In Ireland, quarry blasts make up the majority of signals detected by the Irish National Seismic Network (INSN), increasing analyst workload and making it difficult to produce reliable seismic catalogues. Here we present an automated classification workflow for seismic events based on supervised machine learning methods that is suitable for operational application."
+        },
+        {
+          "label": 0,
+          "title": "Developing Compliance-Oriented Social Media Risk Management Models to Combat Identity Fraud and Cyber Threats",
+          "text": "The models utilize advanced data analytics, natural language processing (NLP), and machine learning algorithms to detect anomalies, suspicious patterns, and unauthorized access or impersonation attempts. Furthermore, the framework incorporates real-time monitoring, automated incident response, and threat intelligence integration to enhance situational awareness."
+        },
+        {
+          "label": 0,
+          "title": "Detecting slow slip signals in southwest Japan based on machine learning trained by real GNSS time series",
+          "text": "With the increase in Global Navigation Satellite System (GNSS) observations, the requirement for objective and automated detection of slow slip event (SSE) signals hidden in displacement time series is increasing. Based on a catalog of 284 short-term SSEs, approximately 16,000 time series containing SSE signals or noises were extracted as training data."
+        },
+        {
+          "label": 0,
+          "title": "Machine Learning for Detecting Time-Transient Phenomena in the Ionosphere and Correlation with Seismo-Induced Events",
+          "text": "This research investigates the potential of detecting precursors to seismic events by analyzing transient phenomena within the ionosphere. The model demonstrated effective generalization, successfully detecting a high proportion of seismic-correlated anomalies."
+        },
+        {
+          "label": 0,
+          "title": "Development of Real-Time Fire Detection Robotic System with Hybrid-Cascade Machine Learning Detection Structure",
+          "text": "A four-stage hybrid-cascade machine learning model was developed by combining state-of-the-art models separately trained on RGB and NIR images. Based on real-life test results, the robotic system with this new hybrid-cascade model could detect the fire source from a safe distance and with notably higher accuracy compared to other structures in this application."
+        },
+        {
+          "label": 0,
+          "title": "2022 14th International Conference on Cyber Conflict: Keep Moving! (CyCon)",
+          "text": "These systems were designed to detect threat signatures in static networks or infer anomalous activity based on their security logs. The use of intelligent and programmable algorithms for ATD will reduce incident response times and enhance the capacity of states to detect threats originating from any layer of their territorial information infrastructure."
+        },
+        {
+          "label": 0,
+          "title": "Automatically Detecting Excavator Anomalies Based on Machine Learning",
+          "text": "Previous research work was mainly based on expert systems and traditional statistical models to detect excavator anomalies. In this paper, we take the first step and explore the use of machine learning methods to automatically detect excavator anomalies by mining its working condition data collected from multiple sensors in this application."
+        },
+        {
+          "label": 0,
+          "title": "Classification and Analysis of Malicious Code Detection Techniques Based on the APT Attack",
+          "text": "As APT attacks continue to be active, there is a need for countermeasures to detect new and existing malicious codes. Based on the results of the analysis, we classify and analyze malicious code detection techniques into security management systems, pattern-based detection, heuristic-based detection, reputation-based detection and behavior-based detection."
+        }
+      ]
+    },
+    {
+      "id": "smart_door_lock",
+      "provenance": "defense_demo_scenario",
+      "source_type": "publication",
+      "query": "smart door lock unlocked by a mobile application allowing time limited access codes recording entry history and notifying the owner when the door opens",
+      "candidates": [
+        {
+          "label": 1,
+          "title": "Design and Security Analysis of Smart Door Locks Controlled by Smartphone Applications",
+          "text": "We analyse a smart door lock that is unlocked from a mobile application over Bluetooth Low Energy, supports temporary guest access codes with expiry, keeps an entry history log of unlocking events and pushes a notification to the owner when the door is opened."
+        },
+        {
+          "label": 1,
+          "title": "Temporary Access Code Management for Connected Residential Door Locks",
+          "text": "This work proposes a scheme for issuing time limited access codes to visitors of a smart lock installation. The lock records every entry in an audit history and the resident receives a notification on the paired phone application."
+        },
+        {
+          "label": 0,
+          "title": "Machine Learning for Real-Time Anomaly Detection in Industrial Access Networks",
+          "text": "We present a real time system that detects anomalies in industrial network traffic using machine learning, automatically raising an incident and notifying the network administrator when unusual patterns appear in the monitored application."
+        },
+        {
+          "label": 0,
+          "title": "A Mobile Application for Time Limited Parking Reservation in Smart Cities",
+          "text": "The proposed mobile application allows drivers to reserve a parking space for a limited time, records the history of reservations and notifies the user when the reserved period is about to expire."
+        },
+        {
+          "label": 0,
+          "title": "Access Control Models for Cloud Storage Services",
+          "text": "This survey reviews access control models for cloud storage, including time based access policies, audit logging of access history and owner notification mechanisms in multi tenant applications."
+        }
+      ]
+    },
+    {
+      "id": "predictive_maintenance_motor",
+      "provenance": "defense_demo_scenario",
+      "source_type": "publication",
+      "query": "predictive maintenance system for an industrial electric motor analysing vibration and temperature in real time using machine learning to estimate an emerging fault and alert a technician before downtime",
+      "candidates": [
+        {
+          "label": 1,
+          "title": "Vibration and Temperature Based Predictive Maintenance of Induction Motors Using Machine Learning",
+          "text": "A condition monitoring system acquires vibration and temperature signals from an industrial induction motor and applies machine learning to estimate an emerging bearing fault, alerting the maintenance technician before an unplanned downtime occurs."
+        },
+        {
+          "label": 1,
+          "title": "Real-Time Fault Prognosis for Electric Motors from Multi-Sensor Vibration Data",
+          "text": "The proposed prognostic framework processes vibration and thermal measurements of electric motors in real time, predicts the remaining useful life and raises a maintenance alert for the responsible technician."
+        },
+        {
+          "label": 0,
+          "title": "Machine Learning Based Detection of Anomalies in Application Logs of Distributed Systems",
+          "text": "We detect anomalies in application logs in real time using machine learning, automatically creating an incident and notifying the system administrator when unusual patterns emerge."
+        },
+        {
+          "label": 0,
+          "title": "Temperature and Vibration Monitoring of Bridges Using Wireless Sensor Networks",
+          "text": "A wireless sensor network measures vibration and temperature of a bridge structure in real time and reports the measurements to a remote server for structural health assessment."
+        },
+        {
+          "label": 0,
+          "title": "Predictive Maintenance of Hospital Air Handling Units with Statistical Process Control",
+          "text": "This study applies statistical process control rather than machine learning to schedule predictive maintenance of hospital air handling equipment, reducing downtime for the facility technician."
+        }
+      ]
+    }
+  ]
+}
