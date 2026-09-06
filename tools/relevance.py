@@ -202,7 +202,14 @@ def salient_query_tokens(query: str, idf: dict[str, float], top_n: int = 6) -> s
     candidates = discriminative_tokens(query) or tokens(query)
     if not idf or not candidates:
         return set()
-    ranked = sorted(candidates, key=lambda token: idf.get(token, _DEFAULT_IDF_WEIGHT), reverse=True)
+    # `candidates` is a set, and IDF ties are common (any two tokens appearing in
+    # the same number of candidate documents share a weight exactly). Sorting by
+    # weight alone left tied tokens in set-iteration order, which depends on
+    # Python's per-process string hash seed — so when a tie group straddled the
+    # top_n cut, which anchors survived changed between runs and the same query
+    # could accept different documents. The token itself is a deterministic
+    # secondary key; it carries no meaning, it only has to be stable.
+    ranked = sorted(candidates, key=lambda token: (-idf.get(token, _DEFAULT_IDF_WEIGHT), token))
     return set(ranked[: max(1, top_n)])
 
 

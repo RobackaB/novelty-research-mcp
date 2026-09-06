@@ -534,11 +534,81 @@ aby prísnejšie filtrovanie nikdy nevyprázdnilo celý zdroj. Rovnaký mechaniz
 je zapojený aj do webového vyhľadávania a do patentového rankingu.
 
 ### 14.4 Nameraný výsledok — offline dataset
-| Metrika | pred | po | zmena |
+
+> **Correction (v0.9.5).** The table originally published here reported precision
+> 0.486 → 0.667 and F1 0.600 → 0.733, a +22 % F1 gain. Those numbers were measured
+> at threshold **3.5**, which the harness hardcoded but which **no source type
+> actually uses** — the server runs at 3.0 (patent, publication) and 2.8 (web).
+> The figures below are measured at the production thresholds. The gain is real
+> but much smaller than published, and it costs recall.
+
+Measured at the production threshold for the dataset's source type (publication,
+3.0), after anchor selection was made deterministic (section 14.8):
+
+| Metrika | v1.0-thesis | súčasný stav | zmena |
 |---|---|---|---|
-| Presnosť | 0.486 | **0.667** | +37 % |
-| F1 | 0.600 | **0.733** | +22 % |
-| Úplnosť | 0.833 | 0.833 | bez zmeny |
+| Presnosť | 0.519 | **0.611** | +18 % |
+| Úplnosť | 1.000 | **0.833** | **−17 %** |
+| F1 | 0.655 | **0.683** | +4 % |
+
+**The recall regression is the important line.** The v1.0-thesis scorer accepted
+every relevant document in the dataset; the current one drops one. IDF weighting
+buys precision by discarding candidates, and on this dataset one of the discarded
+candidates is relevant. Whether that trade is worth it cannot be decided here —
+see the limitation below.
+
+#### Threshold sweep
+
+A single metric at a single threshold hides that trade-off entirely. Reproduce
+with `python -m eval.relevance_eval --sweep`:
+
+| prah | v1.0 P | v1.0 R | v1.0 F1 | teraz P | teraz R | teraz F1 | |
+|---|---|---|---|---|---|---|---|
+| 2.50 | 0.374 | 1.000 | 0.534 | 0.651 | 1.000 | 0.748 | |
+| 2.80 | 0.463 | 1.000 | 0.610 | 0.611 | 0.833 | 0.683 | ← produkcia (web) |
+| 3.00 | 0.519 | 1.000 | 0.655 | 0.611 | 0.833 | 0.683 | ← produkcia (patent, publication) |
+| 3.20 | 0.486 | 0.833 | 0.600 | 0.611 | 0.833 | 0.683 | |
+| 3.50 | 0.486 | 0.833 | 0.600 | 0.667 | 0.833 | 0.733 | ← pôvodne publikované |
+| 4.00 | 0.556 | 0.667 | 0.600 | 0.556 | 0.667 | 0.600 | |
+| 4.50 | 0.556 | 0.667 | 0.600 | 0.556 | 0.500 | 0.489 | |
+
+The published +22 % was the single best cell in this table. At 4.00 the two
+scorers are identical; at 4.50 the current one is **worse**.
+
+#### Reprodukovanie pôvodného skórovania (v1.0-thesis)
+
+`--no-idf` disables IDF weighting but **keeps the stemmer fix**, so it is not the
+original scorer — it produces a third set of numbers (0.431 / 0.556 at 3.5)
+matching neither column above. The help text used to claim otherwise; it has been
+corrected. To measure the true v1.0-thesis behaviour, inject the historical scorer
+through the `score_fn` / `accept_fn` parameters the harness already exposes:
+
+```bash
+git show v1.0-thesis:tools/relevance.py > /tmp/relevance_v1.py
+sed -i 's/^from \.result_contract/from tools.result_contract/' /tmp/relevance_v1.py
+```
+
+```python
+import sys; sys.path.insert(0, "/tmp")
+import relevance_v1 as old
+from eval.relevance_eval import evaluate_dataset
+
+_results, summary = evaluate_dataset(
+    score_fn=old.evidence_score, accept_fn=old.is_relevant, use_idf=False
+)
+```
+
+#### Prečo sú tieto čísla slabý dôkaz
+
+The dataset is **3 queries, 20 candidates, 6 relevant documents**, and only one
+query (`anomaly_logs_real_run`) comes from a real run — the other two were
+constructed by the author, which means the negatives were chosen by the same
+person who wrote the scorer. A difference of 0.028 in F1 across 3 queries is not
+a measurable improvement; it is one document changing side. **No claim of the
+form "+X % better" is supportable at this dataset size**, and the numbers above
+should be read as a smoke test that the component is not broken, not as evidence
+that it is good. Expanding the dataset is the prerequisite for any further tuning
+work, and production thresholds are deliberately left unchanged until then.
 
 Scenár z reálneho behu samostatne: presnosť 0.12 → **0.33**, F1 0.20 → **0.40**
 (prijatých kandidátov 8 → 3, z toho relevantných stále 1 z 2).
@@ -571,6 +641,73 @@ spôsobom.
   ak presnosť klesne pod nameranú úroveň alebo ak IDF prestane byť lepšie než
   pôvodné rovnaké váhy).
 - Živý beh publikačného vyhľadávania na pôvodnom dotaze (tabuľka 14.5).
+
+### 14.8 Nedeterminizmus výberu doménových kotiev (v0.9.5)
+
+Aligning the harness with the production thresholds immediately exposed a latent
+bug that the wrong threshold had been hiding: **the relevance filter was not
+deterministic**. Forty identical runs of `python -m eval.relevance_eval` in
+separate processes produced three different results:
+
+```
+29 runs   precision 0.611   recall 0.833   F1 0.683
+11 runs   precision 0.556   recall 0.833   F1 0.639
+ (rarer)  precision 0.500   recall 0.667   F1 0.550   <- a relevant document rejected
+```
+
+Príčina — `tools/relevance.py`, `salient_query_tokens`:
+
+```python
+candidates = discriminative_tokens(query) or tokens(query)   # a set
+ranked = sorted(candidates, key=lambda token: idf.get(token, _DEFAULT_IDF_WEIGHT), reverse=True)
+return set(ranked[: max(1, top_n)])
+```
+
+`sorted` is stable, so tokens with equal IDF keep their input order — the
+iteration order of a **set**, which depends on Python's per-process string hash
+randomisation. IDF ties are common by construction: any two tokens appearing in
+the same number of candidate documents get exactly the same weight. The first
+dataset query alone produces five distinct tie groups among 17 candidate tokens.
+When a tie group straddles the `top_n = 6` cut, which anchors survive changes
+between runs, and `is_relevant` rejects any document sharing none of them.
+
+This was a **production** defect, not only an evaluation one: the same query
+submitted to the running server could return different documents after a restart.
+
+**Oprava:** a deterministic secondary sort key.
+
+```python
+ranked = sorted(candidates, key=lambda token: (-idf.get(token, _DEFAULT_IDF_WEIGHT), token))
+```
+
+The token itself carries no semantic meaning as a tie-break; it only has to be
+stable. `tools/patent_search.py` already used the same pattern
+(`key=lambda item: (-item.score, item.patent_number)`).
+
+Deliberately **not** done: widening `top_n` to keep every token tied at the cut
+boundary. That is arguably more principled — splitting two equally salient tokens
+is unjustifiable — but it changes filter semantics, and with 20 candidates there
+is no way to measure whether it helps. Deferred until the dataset is larger.
+
+Why the bug survived this long: at threshold 3.5 the acceptance decisions happen
+to land identically regardless of which anchors are chosen, so the old regression
+guard passed on every run. Only at the production thresholds do the outcomes
+diverge. **The wrong measurement configuration was masking the defect.**
+
+### 14.9 Overenie v0.9.5
+
+- `python -m pytest` — **276 passed**, six consecutive runs, no flakes. Before the
+  fix the re-pinned guard failed 2 runs in 6.
+- 25 independent processes of `python -m eval.relevance_eval` now return an
+  identical result; `--sweep` output is byte-identical across 5 processes
+  (verified by `md5sum`).
+- Anchor selection is identical under `PYTHONHASHSEED` values 0, 1, 7, 42, 12345.
+- New tests: deterministic tie-break on an all-tied candidate set; anchor
+  stability under 20 shuffles of the query word order; and a reproducibility test
+  that runs the evaluation in **subprocesses**, since `PYTHONHASHSEED` is fixed
+  for the life of a process and a single-process loop cannot detect this bug.
+- The harness now imports `THRESHOLDS` from `tools.relevance` instead of keeping
+  its own constant, and a drift test asserts the two cannot disagree again.
 
 ## 15. Čistota textu vo výslednom reporte (v0.9.1)
 
