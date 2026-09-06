@@ -1,0 +1,42 @@
+﻿==============================================================================
+VYHODNOTENIE KVALITY HODNOTENIA RELEVANCIE
+==============================================================================
+
+[anomaly_logs_real_run]  (real_production_run)  prah=3.00
+  presnosŁ=0.17  ˙plnosŁ=0.50  F1=0.25  P@2=0.00  AP=0.28  RR=0.33
+  prijatřch 6, z toho relevantnřch 1 (relevantnřch v datasete: 2)
+  poradie podża skˇre:
+     1.      4.60  Developing Compliance-Oriented Social Media Risk Management Mo
+     2.      4.13  Automatically Detecting Excavator Anomalies Based on Machine L
+     3. OK   3.87  Detecting System Anomalies without Labels using Workflow Patte
+     4.      3.35  Real-time classification of Irish seismic events using supervi
+     5.      3.35  Machine Learning for Detecting Time-Transient Phenomena in the
+     6.      3.34  Development of Real-Time Fire Detection Robotic System with Hy
+     7.      3.26  2022 14th International Conference on Cyber Conflict: Keep Mov
+     8.      3.19  Detecting slow slip signals in southwest Japan based on machin
+     9. OK   2.55  A DEEP LEARNING APPROACH FOR DETECTING ANOMALIES IN DISTRIBUTE
+    10.      1.89  Classification and Analysis of Malicious Code Detection Techni
+
+[smart_door_lock]  (defense_demo_scenario)  prah=3.00
+  presnosŁ=0.67  ˙plnosŁ=1.00  F1=0.80  P@2=1.00  AP=1.00  RR=1.00
+  prijatřch 3, z toho relevantnřch 2 (relevantnřch v datasete: 2)
+  poradie podża skˇre:
+     1. OK   6.69  Design and Security Analysis of Smart Door Locks Controlled by
+     2. OK   5.44  Temporary Access Code Management for Connected Residential Doo
+     3.      5.16  A Mobile Application for Time Limited Parking Reservation in S
+     4.      3.14  Access Control Models for Cloud Storage Services
+     5.      2.69  Machine Learning for Real-Time Anomaly Detection in Industrial
+
+[predictive_maintenance_motor]  (defense_demo_scenario)  prah=3.00
+  presnosŁ=1.00  ˙plnosŁ=1.00  F1=1.00  P@2=1.00  AP=1.00  RR=1.00
+  prijatřch 2, z toho relevantnřch 2 (relevantnřch v datasete: 2)
+  poradie podża skˇre:
+     1. OK   7.43  Vibration and Temperature Based Predictive Maintenance of Indu
+     2. OK   4.33  Real-Time Fault Prognosis for Electric Motors from Multi-Senso
+     3.      3.60  Predictive Maintenance of Hospital Air Handling Units with Sta
+     4.      2.31  Machine Learning Based Detection of Anomalies in Application L
+     5.      1.98  Temperature and Vibration Monitoring of Bridges Using Wireless
+
+------------------------------------------------------------------------------
+SPOLU  presnosŁ=0.611  ˙plnosŁ=0.833  F1=0.683  P@k=0.667  MAP=0.759  MRR=0.778
+------------------------------------------------------------------------------

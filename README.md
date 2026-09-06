@@ -173,15 +173,20 @@ pip install -e ".[dev]"
 python -m pytest
 ```
 
-Relevance quality is measured against a gold-standard dataset in `eval/`, scored with
-precision, recall, F1, P@k, MAP and MRR. The harness runs offline, so results are
-reproducible:
+Relevance quality is measured against a small gold-standard dataset in `eval/`, scored
+with precision, recall, F1, P@k, MAP and MRR. Every query is evaluated at the threshold
+the server actually applies to its source type, and the harness is offline and
+deterministic, so results reproduce exactly:
 
 ```bash
 python -m eval.relevance_eval
+python -m eval.relevance_eval --sweep    # precision/recall trade-off across thresholds
 ```
 
-`AUDIT.md` records what each change measured before and after.
+The dataset is currently **3 queries and 20 candidates**, which is enough to catch a
+broken scorer but far too small to support a claim that one scorer is better than
+another. `AUDIT.md` section 14.4 states the measured numbers, the recall trade-off and
+this limitation in full.
 
 ## Repository contents
 

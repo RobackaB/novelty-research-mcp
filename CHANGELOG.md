@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Every release keeps the 7 MCP tool interfaces (names, parameters, response shape)
 compatible with the exported Flowise architecture.
 
+## [0.9.5] Deterministic relevance and production-faithful measurement
+
+### Fixed
+
+- Domain anchor selection was not deterministic. `salient_query_tokens` ranked a **set** of tokens by IDF alone, and `sorted` is stable, so tokens with equal weight kept set-iteration order — which depends on Python's per-process string hash seed. IDF ties are common by construction, so whenever a tie group straddled the `top_n` cut, different anchors survived on different runs and the same query could accept different documents. Forty identical evaluation runs produced three different results, one of which rejected a relevant document. The sort now uses the token as a deterministic secondary key, matching the pattern already used in `patent_search.py`.
+- The evaluation harness measured at a hardcoded threshold of 3.5 while the server runs at 3.0 (patent, publication) and 2.8 (web), so every published quality metric described a configuration that never ran. Thresholds are now imported from `tools.relevance` and resolved per source type; a test asserts the two cannot drift apart again.
+- The `--no-idf` help text claimed to restore pre-v0.9.0 behaviour. It disables IDF weighting but keeps the stemmer fix, so it produces a third set of numbers matching neither the before nor the after column. Corrected, with the real reproduction procedure documented in `AUDIT.md` 14.4.
+
+### Changed
+
+- `AUDIT.md` 14.4 replaced. The previously published +22 % F1 improvement was the single best cell of a threshold sweep and sat at a threshold no source type uses. At production settings the gain is +4 % F1 and comes with a **17 % recall regression**. The correction, the full sweep and the dataset-size limitation are stated explicitly.
+- The regression guard is re-pinned to the production-threshold numbers (0.611 / 0.833 / 0.683). At the old 3.5 the guard passed on every run, which is why the nondeterminism went unnoticed.
+- `README.md` no longer implies the measurement is strong evidence; it states the dataset size (3 queries, 20 candidates) up front.
+
+### Added
+
+- `python -m eval.relevance_eval --sweep` prints precision/recall/F1 across thresholds and marks which rows are production settings.
+- Tests for deterministic tie-breaking, anchor stability under shuffled query word order, and reproducibility across **subprocesses** — necessary because `PYTHONHASHSEED` is fixed for the life of a process, so a single-process loop cannot detect this class of bug.
+
+### Not done deliberately
+
+- Production thresholds are unchanged. Retuning them on 20 candidates would be fitting to six positive examples.
+- `top_n` still cuts mid-tie rather than keeping all equally salient tokens. That is arguably more principled but changes filter semantics, and this dataset cannot measure whether it helps.
+
 ## [0.9.4] Patent relevance and report visibility
 
 ### Fixed
