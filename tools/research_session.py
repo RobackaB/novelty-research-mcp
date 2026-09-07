@@ -1,4 +1,4 @@
-"""Nástroje pre prieskum uložený v SQLite databáze."""
+"""Tools for a research session persisted in a SQLite database."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ MAX_ATTEMPTS_BY_SOURCE_DEFAULT: dict[str, int] = {
 
 
 def _max_attempts_for_source(source_type: str, session_max: int) -> int:
-    """Určí limit pokusov pre konkrétny typ zdroja."""
+    """Return the attempt limit for a specific source type."""
     per_source = MAX_ATTEMPTS_BY_SOURCE_DEFAULT.get(source_type, DEFAULT_MAX_ATTEMPTS_PER_SOURCE)
     return max(1, max(int(session_max or 0), per_source))
 
@@ -65,22 +65,22 @@ SOURCE_AGENT_BY_TYPE = {
 
 
 def _now() -> str:
-    """Vráti aktuálny UTC čas v jednotnom ISO formáte."""
+    """Return the current UTC time in a single consistent ISO format."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _json(value: Any) -> str:
-    """Serializuje hodnotu do čitateľného JSON textu."""
+    """Serialise a value into readable JSON text."""
     return json.dumps(value, ensure_ascii=False, indent=2)
 
 
 def _compact_json(value: Any) -> str:
-    """Serializuje hodnotu do kompaktného JSON textu."""
+    """Serialise a value into compact JSON text."""
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 def _db_path() -> Path:
-    """Vráti cestu k SQLite databáze pre research session."""
+    """Return the path to the SQLite database for research sessions."""
     configured = os.getenv("RESEARCH_SESSION_DB", "").strip()
     if configured:
         return Path(configured).expanduser()
@@ -88,7 +88,7 @@ def _db_path() -> Path:
 
 
 def _open_connection() -> sqlite3.Connection:
-    """Otvorí SQLite pripojenie a pripraví schému databázy."""
+    """Open a SQLite connection and prepare the database schema."""
     path = _db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
@@ -102,7 +102,7 @@ def _open_connection() -> sqlite3.Connection:
 
 @contextmanager
 def _connect() -> Iterator[sqlite3.Connection]:
-    """Poskytne SQLite pripojenie s transakciou a po použití ho vždy zavrie."""
+    """Yield a SQLite connection wrapped in a transaction, always closing it afterwards."""
     conn = _open_connection()
     try:
         with conn:
@@ -112,7 +112,7 @@ def _connect() -> Iterator[sqlite3.Connection]:
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
-    """Vytvorí a migruje tabuľky potrebné pre ukladanie prieskumu."""
+    """Create and migrate the tables needed to store a research session."""
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS research_sessions (
@@ -276,14 +276,14 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-    """Doplní chýbajúci stĺpec do existujúcej tabuľky."""
+    """Add a missing column to an existing table."""
     columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def _clean_session_id(session_id: str | None) -> str:
-    """Vyčistí alebo vytvorí bezpečný identifikátor session."""
+    """Sanitise or generate a safe session identifier."""
     text = str(session_id or "").strip()
     if not text:
         return f"rs_{uuid.uuid4().hex[:16]}"
@@ -291,7 +291,7 @@ def _clean_session_id(session_id: str | None) -> str:
 
 
 def _source_type(value: str) -> str:
-    """Overí a normalizuje typ zdroja."""
+    """Validate and normalise a source type."""
     source_type = str(value or "").strip().lower()
     if source_type not in SOURCE_TYPES:
         raise ValueError("source_type must be one of: patent, publication, web")
@@ -299,24 +299,24 @@ def _source_type(value: str) -> str:
 
 
 def normalize_query_for_hash(query: str) -> str:
-    """Normalizuje dotaz do stabilnej podoby pre hashovanie."""
+    """Normalise a query into a stable form for hashing."""
     normalized = unicodedata.normalize("NFKC", str(query or ""))
     normalized = re.sub(r"\s+", " ", normalized.strip())
     return normalized.lower()
 
 
 def query_hash(query: str) -> str:
-    """Vypočíta krátky stabilný hash normalizovaného dotazu."""
+    """Compute a short stable hash of the normalised query."""
     return hashlib.sha256(normalize_query_for_hash(query).encode("utf-8")).hexdigest()[:24]
 
 
 def _input_hash(value: Any) -> str:
-    """Vypočíta hash vstupných dát pre cache finálnej odpovede."""
+    """Compute a hash of the input data used to cache the final answer."""
     return hashlib.sha256(_compact_json(value).encode("utf-8")).hexdigest()
 
 
 def _status_to_evidence_status(status: str, completed: bool, hit_count: int, reliable_no_results: bool) -> str:
-    """Prevedie stav evidence packu na stav uložený pri danom zdroji."""
+    """Convert an evidence pack status into the status stored for that source."""
     if status == "partial_failure":
         return "partial_failure"
     if status == "ok" and hit_count > 0:
@@ -339,7 +339,7 @@ def _status_to_evidence_status(status: str, completed: bool, hit_count: int, rel
 
 
 def _source_from_merged(merged_text: str, source_type: str) -> dict[str, Any]:
-    """Vyberie normalizovanú časť jedného zdroja zo zlúčeného výstupu."""
+    """Extract the normalised section for one source from the merged output."""
     try:
         merged = json.loads(merged_text)
     except json.JSONDecodeError:
@@ -351,7 +351,7 @@ def _source_from_merged(merged_text: str, source_type: str) -> dict[str, Any]:
 
 
 def _normalize_source_payload(evidence_json: Any, source_type: str, query: str = "") -> dict[str, Any]:
-    """Zjednotí dáta jedného zdroja cez spoločný zlúčený formát."""
+    """Normalise one source's data through the shared merged format."""
     kwargs = {
         "patent_evidence_json": None,
         "publication_evidence_json": None,
@@ -368,7 +368,7 @@ def _normalize_source_payload(evidence_json: Any, source_type: str, query: str =
 
 
 def _missing_source(source_type: str, error_type: str, message: str) -> dict[str, Any]:
-    """Vytvorí normalizovaný záznam pre chýbajúci alebo nepoužiteľný zdroj."""
+    """Build a normalised record for a missing or unusable source."""
     return {
         "source_type": source_type,
         "status": "failed",
@@ -381,12 +381,12 @@ def _missing_source(source_type: str, error_type: str, message: str) -> dict[str
 
 
 def _as_bool_int(value: Any) -> int:
-    """Prevedie boolean hodnotu na databázové 0 alebo 1."""
+    """Convert a boolean into the database representation 0 or 1."""
     return 1 if value is True else 0
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
-    """Bezpečne prevedie hodnotu na celé číslo s predvolenou hodnotou."""
+    """Safely convert a value to an integer, falling back to a default."""
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -394,7 +394,7 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
-    """Bezpečne prevedie hodnotu na desatinné číslo s predvolenou hodnotou."""
+    """Safely convert a value to a float, falling back to a default."""
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -402,25 +402,25 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 
 def _as_list(value: Any) -> list[Any]:
-    """Vráti hodnotu ako zoznam, alebo prázdny zoznam pri inom type."""
+    """Return the value as a list, or an empty list for any other type."""
     return value if isinstance(value, list) else []
 
 
 def _raw_evidence_text(value: Any) -> str:
-    """Prevedie pôvodné dôkazové dáta na text uložený do databázy."""
+    """Convert raw evidence data into the text stored in the database."""
     if isinstance(value, str):
         return value
     return _compact_json(value)
 
 
 def _safe_payload(value: Any) -> str:
-    """Skráti JSON dáta zapisované do diagnostického logu."""
+    """Truncate JSON data written to the diagnostic log."""
     text = _compact_json(value)
     return text[:4000]
 
 
 def _safe_json_loads(value: Any, default: Any = None) -> Any:
-    """Bezpečne načíta JSON alebo vráti predvolenú hodnotu."""
+    """Safely parse JSON, returning a default on failure."""
     if isinstance(value, (dict, list)):
         return value
     if not isinstance(value, str) or not value.strip():
@@ -432,17 +432,17 @@ def _safe_json_loads(value: Any, default: Any = None) -> Any:
 
 
 def _compact_warnings(warnings: list[Any], limit: int = 3) -> list[str]:
-    """Skráti zoznam varovaní na stručné texty pre logovanie."""
+    """Shorten a list of warnings into brief texts for logging."""
     return [re.sub(r"\s+", " ", str(item)).strip()[:240] for item in warnings[:limit] if item]
 
 
 def _truncated_warnings(warnings: list[Any]) -> list[str]:
-    """Skráti text každého varovania bez obmedzenia ich počtu.
+    """Truncate the text of each warning without limiting how many there are.
 
-    Používa sa v ACK odpovediach namiesto surových varovaní, ktoré môžu
-    obsahovať úryvky zo zlyhaného fetchu (napr. časť naškrábanej stránky) —
-    supervisor má podľa promptu vidieť len krátke kontrolné polia, takže
-    dlhý surový text sa sem nemá dostať ani ako "vedľajší" údaj.
+    Used in ACK responses instead of the raw warnings, which can contain
+    fragments of a failed fetch (part of a scraped page, for example). The
+    supervisor is prompted to see only short control fields, so long raw text
+    must not reach it even incidentally.
     """
     return [re.sub(r"\s+", " ", str(item)).strip()[:240] for item in warnings if item]
 
@@ -460,7 +460,7 @@ def _record_trace(
     attempt: int = 0,
     payload: Any = None,
 ) -> None:
-    """Uloží diagnostickú udalosť do tabuľky trace_events."""
+    """Store a diagnostic event in the trace_events table."""
     conn.execute(
         """INSERT INTO trace_events(
             session_id, run_id, event_type, agent_name, tool_name, source_type,
@@ -484,7 +484,7 @@ def _record_trace(
 
 
 def _ensure_session(conn: sqlite3.Connection, session_id: str, original_query: str = "") -> None:
-    """Vytvorí výskumnú reláciu alebo doplní pôvodný dotaz pri existujúcej relácii."""
+    """Create a research session, or fill in the original query on an existing one."""
     timestamp = _now()
     conn.execute(
         """INSERT INTO research_sessions(
@@ -504,7 +504,7 @@ def _ensure_session(conn: sqlite3.Connection, session_id: str, original_query: s
 
 
 def _set_session_status(conn: sqlite3.Connection, session_id: str, status: str) -> None:
-    """Aktualizuje stav relácie bez prepísania už dokončenej relácie."""
+    """Update the session status without overwriting an already completed session."""
     current = _session_row(conn, session_id)
     if current and str(current["status"]) == "completed" and status != "completed":
         return
@@ -515,7 +515,7 @@ def _set_session_status(conn: sqlite3.Connection, session_id: str, status: str) 
 
 
 def _next_attempt(conn: sqlite3.Connection, session_id: str, source_type: str) -> int:
-    """Vypočíta číslo ďalšieho pokusu pre daný zdroj."""
+    """Compute the next attempt number for a given source."""
     row = conn.execute(
         "SELECT COALESCE(MAX(attempt), 0) AS max_attempt FROM evidence_results WHERE session_id=? AND source_type=?",
         (session_id, source_type),
@@ -524,7 +524,7 @@ def _next_attempt(conn: sqlite3.Connection, session_id: str, source_type: str) -
 
 
 def _latest_rows(conn: sqlite3.Connection, session_id: str) -> dict[str, sqlite3.Row]:
-    """Načíta najnovší uložený pokus pre každý typ zdroja."""
+    """Load the most recent stored attempt for each source type."""
     rows: dict[str, sqlite3.Row] = {}
     for source_type in SOURCE_TYPES:
         row = conn.execute(
@@ -557,7 +557,7 @@ _STATUS_RANK = {
 
 
 def _row_quality_key(row: sqlite3.Row, source_type: str) -> tuple[int, int, float, int]:
-    """Vypočíta porovnávací kľúč kvality uloženého pokusu."""
+    """Compute the comparison key ranking the quality of a stored attempt."""
     normalized = _safe_json_loads(row["normalized_json"], {}) or {}
     graded = grade_source(normalized if isinstance(normalized, dict) else None, source_type)
     grade = str(row["quality_grade"] or "").strip() or str(graded.get("quality_grade") or "missing")
@@ -573,7 +573,7 @@ def _row_quality_key(row: sqlite3.Row, source_type: str) -> tuple[int, int, floa
 
 
 def _best_attempt_rows(conn: sqlite3.Connection, session_id: str) -> dict[str, sqlite3.Row]:
-    """Vyberie najkvalitnejší pokus pre každý typ zdroja."""
+    """Select the highest-quality attempt for each source type."""
     rows: dict[str, sqlite3.Row] = {}
     for source_type in SOURCE_TYPES:
         candidates = conn.execute(
@@ -591,7 +591,7 @@ _RETRY_SATURATION_MIN_INSERTED = 1
 
 
 def _is_source_retry_saturated(latest_row: sqlite3.Row | None) -> bool:
-    """Zistí, či posledný retry priniesol prevažne duplicitné nálezy."""
+    """Determine whether the last retry returned mostly duplicate hits."""
     if not latest_row:
         return False
     try:
@@ -615,7 +615,7 @@ def _retrieval_status_notes(
     latest: dict[str, sqlite3.Row],
     best: dict[str, sqlite3.Row],
 ) -> list[str]:
-    """Pripraví poznámky, keď je najlepší pokus starší než posledný opakovaný pokus."""
+    """Build notes for when the best attempt is older than the most recent retry."""
     notes: list[str] = []
     for source_type in SOURCE_TYPES:
         latest_row = latest.get(source_type)
@@ -636,7 +636,7 @@ def _retrieval_status_notes(
 
 
 def _attempt_metadata(conn: sqlite3.Connection, session_id: str) -> dict[str, dict[str, int]]:
-    """Vytvorí stručný prehľad posledného stavu pre každý typ zdroja."""
+    """Build a brief overview of the latest state for each source type."""
     out: dict[str, dict[str, int]] = {}
     rows = conn.execute(
         """
@@ -661,7 +661,7 @@ def _attempt_metadata(conn: sqlite3.Connection, session_id: str) -> dict[str, di
 
 
 def _attempt_counts(conn: sqlite3.Connection, session_id: str) -> dict[str, int]:
-    """Vráti počet uložených pokusov pre každý typ zdroja."""
+    """Return the number of stored attempts for each source type."""
     rows = conn.execute(
         """SELECT source_type, COUNT(*) AS attempt_count
         FROM evidence_results
@@ -678,7 +678,7 @@ def _budget_exceeded_sources(
     session_id: str,
     per_source_max: dict[str, int] | None = None,
 ) -> set[str]:
-    """Zistí, ktoré zdroje už prekročili povolený počet pokusov."""
+    """Determine which sources have already exceeded their allowed attempt count."""
     rows = conn.execute(
         """
         SELECT source_type, MAX(attempt) AS rejected_attempt
@@ -704,7 +704,7 @@ def _budget_exceeded_sources(
 
 
 def _max_attempts(conn: sqlite3.Connection, session_id: str) -> int:
-    """Načíta všeobecný limit pokusov uložený pri session."""
+    """Load the general attempt limit stored with the session."""
     session = _session_row(conn, session_id)
     if not session:
         return DEFAULT_MAX_ATTEMPTS_PER_SOURCE
@@ -712,13 +712,13 @@ def _max_attempts(conn: sqlite3.Connection, session_id: str) -> int:
 
 
 def _max_attempts_for_session_source(conn: sqlite3.Connection, session_id: str, source_type: str) -> int:
-    """Vráti limit pokusov pre daný zdroj v konkrétnej session."""
+    """Return the attempt limit for a given source within a specific session."""
     session_max = _max_attempts(conn, session_id)
     return _max_attempts_for_source(source_type, session_max)
 
 
 def _row_summary(row: sqlite3.Row, include_evidence: bool = False) -> dict[str, Any]:
-    """Z databázového záznamu vytvorí stručný JSON súhrn výsledku evidencie."""
+    """Build a brief JSON summary of an evidence result from a database row."""
     summary: dict[str, Any] = {
         "source_type": row["source_type"],
         "attempt": int(row["attempt"]),
@@ -750,12 +750,12 @@ def _row_summary(row: sqlite3.Row, include_evidence: bool = False) -> dict[str, 
 
 
 def _session_row(conn: sqlite3.Connection, session_id: str) -> sqlite3.Row | None:
-    """Načíta databázový riadok konkrétnej research session."""
+    """Load the database row for a specific research session."""
     return conn.execute("SELECT * FROM research_sessions WHERE session_id=?", (session_id,)).fetchone()
 
 
 def _row_has_focused_hit(row: sqlite3.Row | None) -> bool:
-    """Zistí, či uložený výsledok obsahuje aspoň jeden zameraný nález."""
+    """Determine whether a stored result contains at least one focused hit."""
     if not row:
         return False
     try:
@@ -769,7 +769,7 @@ def _row_has_focused_hit(row: sqlite3.Row | None) -> bool:
 
 
 def research_session_start(original_query: str, session_id: str = "") -> str:
-    """Vytvorí alebo načíta prieskum a vráti jeho identifikátor."""
+    """Create or load a research session and return its identifier."""
     cleaned_query = clean_tool_query(original_query)
     clean_id = _clean_session_id(session_id)
     with _connect() as conn:
@@ -800,7 +800,7 @@ def research_session_start(original_query: str, session_id: str = "") -> str:
 
 
 def _query_terms_for_envelope(query: str) -> list[str]:
-    """Vyberie hlavné významové termíny, ktoré sa použijú pri zostavení query envelope."""
+    """Select the main meaningful terms used to build the query envelope."""
     stop = {
         "the", "and", "for", "with", "that", "this", "from", "into", "using", "about",
         "does", "exist", "already", "concept", "idea", "what", "which", "there",
@@ -818,7 +818,7 @@ def _query_terms_for_envelope(query: str) -> list[str]:
 
 
 def _detect_query_language(query: str) -> str:
-    """Odhadne, či dotaz obsahuje neanglické znaky."""
+    """Estimate whether the query contains non-English characters."""
     text = (query or "").lower()
     if re.search(r"[^\x00-\x7f]", text):
         return "non_english"
@@ -826,12 +826,12 @@ def _detect_query_language(query: str) -> str:
 
 
 def _focused_variant(terms: list[str], start: int = 0, width: int = 10) -> str:
-    """Z vybraných termínov zostaví kratší variant vyhľadávacieho dotazu."""
+    """Build a shorter search query variant from the selected terms."""
     return " ".join(terms[start:start + width]).strip()
 
 
 def _compact_query_text(text: str, max_tokens: int = 28) -> str:
-    """Skráti text dotazu na obmedzený počet tokenov."""
+    """Truncate query text to a limited number of tokens."""
     tokens = re.findall(r"[\w-]+", str(text or ""))
     return " ".join(tokens[:max_tokens]).strip()
 
@@ -842,7 +842,7 @@ def _web_query_variants(
     core_subject: str,
     atomic: list[dict[str, Any]],
 ) -> list[str]:
-    """Zostaví viacero webových variantov dotazu, aby sa zlepšilo pokrytie výsledkov."""
+    """Build several web query variants to improve result coverage."""
     out: list[str] = list(base_variants[:3])
     core = re.sub(r"\s+", " ", str(core_subject or "")).strip()
     if not core:
@@ -873,7 +873,7 @@ _LOW_PRIORITY_TAIL_CATEGORY = "object_or_form_factor"
 
 
 def _query_variants_from_atoms(clean_query: str, key_terms: list[str], atomic: list[dict[str, Any]]) -> list[str]:
-    """Vytvorí vyhľadávacie varianty z atomických požiadaviek dotazu."""
+    """Build search variants from the query's atomic requirements."""
     labels = [
         re.sub(r"\s+", " ", str(atom.get("label") or "")).strip()
         for atom in atomic
@@ -893,10 +893,10 @@ def _query_variants_from_atoms(clean_query: str, key_terms: list[str], atomic: l
         core = labels[0]
 
     full_atom_variant = _compact_query_text(" ".join(labels), 32)
-    # Zoradí ostatné požiadavky tak, aby konkrétnejšie kategórie (funkcia,
-    # mechanizmus, obmedzenie) predchádzali všeobecnejším (predmet/forma) —
-    # ak sa dotaz musí orezať na limit tokenov, zahodia sa najprv menej
-    # rozlišujúce prvky, nie ľubovoľné podľa pozície v dotaze.
+    # Order the remaining requirements so that more specific categories (function,
+    # mechanism, constraint) come before more general ones (subject/form). If the
+    # query has to be trimmed to the token limit, the least discriminating parts
+    # are dropped first rather than whichever happened to come last.
     other_atoms = [
         atom
         for atom in atomic
@@ -922,7 +922,7 @@ _ACTION_LIKE_SUFFIXES = ("ing", "tion", "sion")
 
 
 def _looks_action_like(token: str) -> bool:
-    """Zistí čisto morfologicky, či token vyzerá ako akčný/funkčný výraz."""
+    """Determine purely morphologically whether a token looks like an action or function word."""
     text = (token or "").lower()
     return len(text) >= 5 and any(text.endswith(suffix) for suffix in _ACTION_LIKE_SUFFIXES)
 
@@ -961,7 +961,7 @@ _META_TRAILING_PATTERNS = (
 )
 
 def _strip_meta_verification_framing(text: str) -> str:
-    """Vyčistí dotaz od všeobecných overovacích fráz bez zásahu do technického obsahu."""
+    """Strip generic verification phrasing from a query without touching its technical content."""
     original = re.sub(r"\s+", " ", str(text or "")).strip()
     stripped = original
     for _ in range(3): 
@@ -977,7 +977,7 @@ def _strip_meta_verification_framing(text: str) -> str:
 
 
 def _phrase_informative_token_count(phrase: str) -> int:
-    """Spočíta významové tokeny vo fráze po odfiltrovaní výplne."""
+    """Count the meaningful tokens in a phrase after filtering out filler."""
     tokens = re.findall(r"[\w-]+", (phrase or "").lower())
     return sum(
         1 for tok in tokens
@@ -986,7 +986,7 @@ def _phrase_informative_token_count(phrase: str) -> int:
 
 
 def _phrase_has_atomic_facet_token(phrase: str) -> bool:
-    """Rozhodne, či krátka fráza obsahuje dosť konkrétny prvok na samostatné pokrytie."""
+    """Decide whether a short phrase is specific enough to be covered on its own."""
     for tok in re.findall(r"[\w-]+", phrase or ""):
         if tok.lower() in _PHRASE_FILLER_TOKENS:
             continue
@@ -999,21 +999,21 @@ def _phrase_has_atomic_facet_token(phrase: str) -> bool:
     return False
 
 def _first_content_token(phrase: str) -> str:
-    """Vráti prvý významový token frázy podľa pôvodného poradia slov."""
+    """Return the phrase's first meaningful token in original word order."""
     for tok in re.findall(r"[\w-]+", (phrase or "").lower()):
         if tok not in _PHRASE_FILLER_TOKENS:
             return tok
     return ""
 
 def _looks_clause_initial_verb(token: str) -> bool:
-    """Rozpozná, či prvé slovo vety vyzerá ako slovesný prísudok."""
+    """Recognise whether a clause's first word looks like a finite verb."""
     text = (token or "").lower()
     if len(text) < 4 or text in _PHRASE_FILLER_TOKENS or "-" in text:
         return False
     return text.endswith(("s", "ing", "ed"))
 
 def _split_into_phrases_tagged(query: str) -> list[tuple[str, bool]]:
-    """Rozdelí dotaz na frázy a rozpozná časti, ktoré majú vlastný slovesný dej."""
+    """Split a query into phrases and identify the parts carrying their own verb."""
     text = re.sub(r"[?!.;]", ",", str(query or ""))
     text = re.sub(
         r",\s*(?:and|with|via|by|through|for|using|uses?|having|including|comprising)\b",
@@ -1072,7 +1072,7 @@ def _split_into_phrases_tagged(query: str) -> list[tuple[str, bool]]:
         return [(phrase, predicate) for phrase, predicate, _sb, _sa in tagged]
 
     def _joined(left: str, separator: str | None, right: str) -> str:
-        """Spojí dve frázy a zachová významovú spojku medzi nimi."""
+        """Join two phrases, preserving the meaningful conjunction between them."""
         middle = f" {separator} " if separator else " "
         return re.sub(r"\s+", " ", f"{left}{middle}{right}").strip()
 
@@ -1107,12 +1107,12 @@ def _split_into_phrases_tagged(query: str) -> list[tuple[str, bool]]:
 
 
 def _split_into_phrases(query: str) -> list[str]:
-    """Rozdelí dotaz na zmysluplné frázy bez príliš tenkých segmentov."""
+    """Split a query into meaningful phrases without producing overly thin segments."""
     return [phrase for phrase, _predicate in _split_into_phrases_tagged(query)]
 
 
 def _extract_query_facets(query: str, key_terms: list[str]) -> dict[str, Any]:
-    """Rozloží dotaz na hlavné časti potrebné pre ďalšie spracovanie."""
+    """Break a query into the main parts needed for further processing."""
     lower = (query or "").lower()
     tokens = set(key_terms)
 
@@ -1157,13 +1157,13 @@ def _extract_query_facets(query: str, key_terms: list[str]) -> dict[str, Any]:
 
 
 def _is_loose_modifier(token: str) -> bool:
-    """Zistí, či token pôsobí ako voľný modifikátor hlavného pojmu."""
+    """Determine whether a token acts as a loose modifier of the main concept."""
     t = token.lower()
     return any(t.endswith(suf) for suf in _LOOSE_MODIFIER_SUFFIXES)
 
 
 def _phrase_meaningful_tokens(phrase: str) -> list[str]:
-    """Vyberie z frázy významové tokeny a odstráni všeobecnú výplň."""
+    """Select the meaningful tokens from a phrase and drop generic filler."""
     tokens = re.findall(r"[\w-]+", (phrase or "").lower())
     out: list[str] = []
     for tok in tokens:
@@ -1176,14 +1176,14 @@ def _phrase_meaningful_tokens(phrase: str) -> list[str]:
 
 
 def _is_generic_head_noun(token: str) -> bool:
-    """Rozhodne, či je token príliš všeobecný ako hlavné podstatné meno."""
+    """Decide whether a token is too generic to serve as a head noun."""
     from .result_contract import GENERIC_MECHANISM_TOKENS
     return token in GENERIC_MECHANISM_TOKENS
 
 _LABEL_DROP_TOKENS = frozenset({"a", "an", "the"})
 
 def _phrase_display_label(phrase: str) -> str:
-    """Vytvorí čitateľný štítok z frázy so zachovaním dôležitých vnútorných vzťahov."""
+    """Build a readable label from a phrase, preserving important internal relations."""
     raw_tokens = re.findall(r"[\w-]+", phrase or "")
     start = 0
     end = len(raw_tokens)
@@ -1202,7 +1202,7 @@ def _phrase_display_label(phrase: str) -> str:
     return " ".join(kept).strip()
 
 def _token_display_map(phrase: str) -> dict[str, str]:
-    """Vytvorí mapu tokenov na zobraziteľné tvary zo vstupnej frázy."""
+    """Build a map from tokens to their displayable forms using the input phrase."""
     mapping: dict[str, str] = {}
     for raw in re.findall(r"[\w-]+", phrase or ""):
         lowered = raw.lower()
@@ -1213,17 +1213,17 @@ def _token_display_map(phrase: str) -> dict[str, str]:
     return mapping
 
 def _label_from_tokens(tokens: list[str], display_map: dict[str, str] | None = None) -> str:
-    """Zloží používateľsky čitateľný štítok zo zoznamu tokenov."""
+    """Assemble a user-readable label from a list of tokens."""
     mapping = display_map or {}
     return " ".join(mapping.get(token, token) for token in tokens if token).strip()
 
 def _is_action_head(token: str) -> bool:
-    """Zistí morfologicky, či token môže byť hlavou akčnej alebo funkčnej frázy."""
+    """Determine morphologically whether a token can head an action or function phrase."""
     return _looks_action_like(token)
 
 
 def _normalize_atom_term(token: str) -> str:
-    """Normalizuje token atomickej požiadavky bez doménových mapovaní tvarov."""
+    """Normalise an atomic requirement token without domain-specific form mappings."""
     return (token or "").lower().strip()
 
 _TOO_BROAD_ATOM_TOKEN_LIMIT = 4
@@ -1237,7 +1237,7 @@ _GENERIC_HEAD_NOUNS = frozenset({
 })
 
 def _is_informative_atom_token(token: str) -> bool:
-    """Zistí, či token má dosť informácie pre samostatnú požiadavku."""
+    """Determine whether a token carries enough information to be its own requirement."""
     text = str(token or "").strip().lower()
     return bool(text) and (len(text) >= 4 or "-" in text)
 
@@ -1249,7 +1249,7 @@ def _append_atom(
     label: str,
     terms: list[str],
 ) -> None:
-    """Pridá atomickú požiadavku, ak nie je duplicitná ani príliš všeobecná."""
+    """Append an atomic requirement unless it is a duplicate or too generic."""
     clean_label = re.sub(r"\s+", " ", label).strip()
     if not clean_label:
         return
@@ -1294,7 +1294,7 @@ def _purpose_clause_atoms(
     atomic: list[dict[str, Any]],
     seen_labels: set[str],
 ) -> bool:
-    """Vytvorí atomické požiadavky z fráz, ktoré v dotaze vyjadrujú účel."""
+    """Build atomic requirements from the phrases expressing purpose in the query."""
     match = re.search(
         r"^(?P<prefix>.+?)\s+to\s+(?P<verb>verify|verifies|verified|verifying|confirm|confirms|confirmed|validate|validates|validated|check|checks|checked)\s+(?:whether|if|that)?\s*(?P<clause>.+)$",
         phrase,
@@ -1330,7 +1330,7 @@ def _purpose_clause_atoms(
     return len(atomic) > before_count
 
 def _chunk_split_phrase(phrase: str, predicate: bool = False) -> list[str]:
-    """Rozdelí zložitú frázu na menšie požiadavkové časti."""
+    """Split a complex phrase into smaller requirement parts."""
     tokens = _phrase_meaningful_tokens(phrase)
     if not tokens:
         return []
@@ -1389,7 +1389,7 @@ def _chunk_split_phrase(phrase: str, predicate: bool = False) -> list[str]:
     return [_label_from_tokens(c[1], display_map) for c in chunks if c[1]]
 
 def _classify_chunk(tokens: list[str], predicate: bool = False) -> str:
-    """Určí neutrálnu kategóriu časti dotazu podľa jej jazykovej štruktúry."""
+    """Assign a neutral category to a query part based on its linguistic structure."""
     if not tokens:
         return "object_or_form_factor"
 
@@ -1397,7 +1397,7 @@ def _classify_chunk(tokens: list[str], predicate: bool = False) -> str:
         return "function"
 
     def _is_subject_noun(t: str) -> bool:
-        """Zistí, či token môže byť predmetovým podstatným menom."""
+        """Determine whether a token can serve as the subject noun."""
         if _looks_action_like(t):
             return False
         if _is_loose_modifier(t):
@@ -1427,7 +1427,7 @@ def _classify_chunk(tokens: list[str], predicate: bool = False) -> str:
 
 
 def _atomic_requirements_from_query(query: str, key_terms: list[str]) -> list[dict[str, Any]]:
-    """Vytvorí zo vstupného dotazu zoznam atomických požiadaviek."""
+    """Build the list of atomic requirements from the input query."""
     tagged_phrases = _split_into_phrases_tagged(query)
     if not tagged_phrases:
         return []
@@ -1461,7 +1461,7 @@ def _atomic_requirements_from_query(query: str, key_terms: list[str]) -> list[di
     return _consolidate_atoms(atomic)
 
 def _consolidate_atoms(atomic: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Odstráni atomické požiadavky, ktoré nepridávajú nový význam oproti konkrétnejším požiadavkám."""
+    """Drop atomic requirements that add no meaning beyond more specific ones."""
     if len(atomic) <= 1:
         return atomic
     term_sets = [frozenset(str(t).lower() for t in (atom.get("terms") or [])) for atom in atomic]
@@ -1482,7 +1482,7 @@ def _merge_display_labels(
     analysis_atoms: list[dict[str, Any]],
     display_atoms: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Doplní k analytickým atómom štítky z pôvodného dotazu, ak sa dajú bezpečne zarovnať."""
+    """Attach labels from the original query to the analytic atoms where they align safely."""
     if not analysis_atoms:
         return []
     reliable = (
@@ -1500,7 +1500,7 @@ def _merge_display_labels(
     return merged
 
 def _build_query_envelope(original_query: str, english_query: str = "") -> dict[str, Any]:
-    """Zostaví štruktúrovaný opis dotazu pre ďalšie kroky prieskumu."""
+    """Build a structured description of the query for the later research steps."""
     clean_query = clean_tool_query(original_query)
     clean_english = clean_tool_query(english_query)
     analysis_query = _strip_meta_verification_framing(clean_english or clean_query)
@@ -1581,7 +1581,7 @@ def research_session_understand_query(
     run_id: str = "",
     english_query: str = "",
 ) -> str:
-    """Uloží a rozloží používateľský dotaz pre ďalšie kroky prieskumu."""
+    """Store and decompose the user's query for the later research steps."""
     clean_id = _clean_session_id(session_id)
     with _connect() as conn:
         session = _session_row(conn, clean_id)
@@ -1644,7 +1644,7 @@ def _error_ack(
     received_source_type: str = "",
     english_query: str = "",
 ) -> str:
-    """Vytvorí jednotnú JSON odpoveď pre odmietnutý alebo chybný zápis."""
+    """Build a uniform JSON response for a rejected or failed write."""
     diag = _english_query_diagnostics(source_type, english_query)
     payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -1682,7 +1682,7 @@ def _error_ack(
     return _json(payload)
 
 def _english_query_diagnostics(source_type: str, english_query: str) -> dict[str, bool]:
-    """Vráti príznaky, či bol pre daný zdroj použitý anglický dotaz."""
+    """Return flags indicating whether an English query was used for a source."""
     received = bool((english_query or "").strip())
     source = _source_type(source_type)
     return {
@@ -1692,7 +1692,7 @@ def _english_query_diagnostics(source_type: str, english_query: str) -> dict[str
     }
 
 def _add_english_query_diagnostics(ack_text: str, source_type: str, english_query: str) -> str:
-    """Doplní diagnostiku anglického dotazu do existujúceho JSON ack textu."""
+    """Add English-query diagnostics to an existing JSON ack text."""
     try:
         payload = json.loads(ack_text)
     except Exception:
@@ -1712,7 +1712,7 @@ def _begin_source_attempt(
     agent_name: str = "",
     tool_name: str = "",
 ) -> dict[str, Any]:
-    """Založí nový pokus pre daný zdroj alebo vysvetlí, prečo sa nemôže vytvoriť."""
+    """Open a new attempt for a source, or explain why one cannot be created."""
     clean_id = _clean_session_id(session_id)
     clean_source = _source_type(source_type)
     clean_query = clean_tool_query(query)
@@ -1900,7 +1900,7 @@ def _begin_source_attempt(
 
 
 def _duplicate_ack(begin: dict[str, Any]) -> str:
-    """Vytvorí odpoveď pre opakované volanie, ktoré už bolo uložené."""
+    """Build the response for a repeated call whose result was already stored."""
     row = begin["row"]
     quality_grade = str(row["quality_grade"] or "missing") if "quality_grade" in row.keys() else "missing"
     return _json(
@@ -1941,7 +1941,7 @@ def _duplicate_ack(begin: dict[str, Any]) -> str:
     )
 
 def _canonical_id(source_type: str, hit: dict[str, Any]) -> str:
-    """Vytvorí stabilný identifikátor, podľa ktorého sa dá nájdený výsledok deduplikovať."""
+    """Build a stable identifier by which a hit can be deduplicated."""
     candidates = []
     if source_type == "patent":
         candidates = ["patent_number", "publication_number", "family_id", "id", "url"]
@@ -1964,7 +1964,7 @@ def _insert_raw_items(
     attempt: int,
     hits: list[Any],
 ) -> tuple[int, int]:
-    """Uloží jednotlivé nálezy do raw_evidence_items a spočíta duplicity."""
+    """Store individual hits in raw_evidence_items and count the duplicates."""
     inserted = 0
     duplicate = 0
     timestamp = _now()
@@ -2039,7 +2039,7 @@ def research_session_save_evidence(
     run_id: str = "",
     english_query: str = "",
 ) -> str:
-    """Uloží jeden výsledok zdroja do databázy prieskumu."""
+    """Store one source's result in the research database."""
     clean_id = _clean_session_id(session_id)
     clean_source = _source_type(source_type)
     clean_query = clean_tool_query(query)
@@ -2212,7 +2212,7 @@ def research_session_record_failure(
     agent_name: str = "",
     english_query: str = "",
 ) -> str:
-    """Uloží neúspešný pokus zdroja do session ako štruktúrovanú chybu."""
+    """Store a source's failed attempt in the session as a structured error."""
     clean_id = _clean_session_id(session_id)
     clean_source = _source_type(source_type)
     clean_query = clean_tool_query(query)
@@ -2296,7 +2296,7 @@ def research_session_record_failure(
     )
 
 def research_session_get(session_id: str, include_evidence: bool = False, include_history: bool = False) -> str:
-    """Načíta stav prieskumu z databázy."""
+    """Load the state of a research session from the database."""
     clean_id = _clean_session_id(session_id)
     with _connect() as conn:
         session = _session_row(conn, clean_id)
@@ -2353,7 +2353,7 @@ def _atoms_missing_full_coverage(
     latest_rows: dict[str, sqlite3.Row],
     atomic_requirements: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Nájde atomické požiadavky, ktoré nepokrýva žiadny uložený nález."""
+    """Find the atomic requirements that no stored hit covers."""
     if not isinstance(atomic_requirements, list) or not atomic_requirements:
         return []
     all_blobs: list[str] = []
@@ -2385,7 +2385,7 @@ def _atoms_missing_full_coverage(
     return uncovered
 
 def _planned_query(original_query: str, source_type: str, attempt_count: int, query_envelope: dict[str, Any] | None = None) -> str:
-    """Určí, ktorý variant dotazu sa má použiť pri aktuálnom pokuse."""
+    """Determine which query variant to use for the current attempt."""
     base = clean_tool_query(original_query)
     variants = []
     if isinstance(query_envelope, dict):
@@ -2399,7 +2399,7 @@ def _planned_query(original_query: str, source_type: str, attempt_count: int, qu
     return variants[index]
 
 def _writer_query(session_id: str, query: str, source_type: str, attempt_no: int) -> str:
-    """Určí dotaz, ktorý má writer použiť pri zápise výsledku."""
+    """Determine the query the writer should record with the result."""
     clean_query = clean_tool_query(query)
     if clean_query:
         return clean_query
@@ -2424,7 +2424,7 @@ def _source_check(
     max_attempts_per_source: int,
     query_envelope: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Vyhodnotí jeden zdroj a pripraví prípadnú retry akciu."""
+    """Evaluate one source and prepare a retry action if needed."""
     actions: list[dict[str, Any]] = []
     if not row:
         budget_exhausted = attempt_count >= max_attempts_per_source
@@ -2526,7 +2526,7 @@ def research_session_checklist(
     min_total_hits: int = 1,
     run_id: str = "",
 ) -> str:
-    """Skontroluje stav prieskumu a navrhne prípadné ďalšie kroky."""
+    """Check the state of the research session and propose any next steps."""
     clean_id = _clean_session_id(session_id)
     with _connect() as conn:
         session = _session_row(conn, clean_id)
@@ -2775,7 +2775,7 @@ def research_session_checklist(
     )
 
 def research_session_plan_next(session_id: str) -> str:
-    """Vráti návrhy ďalších vyhľadávacích krokov podľa stavu prieskumu."""
+    """Return suggested next search steps based on the state of the session."""
     clean_id = _clean_session_id(session_id)
     checklist = json.loads(research_session_checklist(clean_id))
     actions = checklist.get("retry_actions") if isinstance(checklist, dict) else []
@@ -2813,7 +2813,7 @@ def research_session_plan_next(session_id: str) -> str:
     )
 
 def _best_attempt_normalized(conn: sqlite3.Connection, session_id: str, source_type: str) -> dict[str, Any] | None:
-    """Načíta normalizované výsledky z najlepšieho dostupného pokusu pre daný zdroj."""
+    """Load the normalised results from the best available attempt for a source."""
     row = _best_attempt_rows(conn, session_id).get(source_type)
     if not row:
         return None
@@ -2824,7 +2824,7 @@ def _best_attempt_normalized(conn: sqlite3.Connection, session_id: str, source_t
     return parsed if isinstance(parsed, dict) else None
 
 def research_session_merge(session_id: str, original_query: str = "") -> str:
-    """Spojí najlepšie uložené dôkazy daného prieskumu."""
+    """Merge the best stored evidence for the given research session."""
     clean_id = _clean_session_id(session_id)
     with _connect() as conn:
         session = _session_row(conn, clean_id)
@@ -2856,7 +2856,7 @@ def research_session_final_answer(
     force_regenerate: bool = False,
     run_id: str = "",
 ) -> str:
-    """Vytvorí výslednú odpoveď z uložených dôkazov prieskumu."""
+    """Build the final answer from the session's stored evidence."""
     return research_session_final_answer_cached(
         session_id=session_id,
         original_query=original_query,
@@ -2872,7 +2872,7 @@ def research_session_final_answer_cached(
     force_regenerate: bool = False,
     run_id: str = "",
 ) -> str:
-    """Vytvorí finálnu debug odpoveď alebo použije jej cacheovanú verziu."""
+    """Build the final debug answer, or reuse its cached version."""
     clean_id = _clean_session_id(session_id)
     with _connect() as conn:
         session = _session_row(conn, clean_id)
@@ -2932,7 +2932,7 @@ def research_session_user_answer(
     force_regenerate: bool = False,
     run_id: str = "",
 ) -> str:
-    """Vytvorí používateľský výstup z dôkazov uložených v databáze."""
+    """Build the user-facing output from the evidence stored in the database."""
     clean_id = _clean_session_id(session_id)
     with _connect() as conn:
         session = _session_row(conn, clean_id)
@@ -3052,7 +3052,7 @@ def research_session_user_answer(
     return str(payload.get("user_answer") or "")
 
 def _load_atomic_requirements(session_id: str) -> list[dict[str, Any]] | None:
-    """Načíta atomické požiadavky z uloženého query envelope danej session."""
+    """Load the atomic requirements from the session's stored query envelope."""
     try:
         with _connect() as conn:
             session = _session_row(conn, _clean_session_id(session_id))
@@ -3071,7 +3071,7 @@ def _load_atomic_requirements(session_id: str) -> list[dict[str, Any]] | None:
 
 
 def _envelope_query_too_generic(session_id: str) -> bool:
-    """Skontroluje, či query envelope považuje dotaz za príliš všeobecný."""
+    """Check whether the query envelope flags the query as too generic."""
     try:
         with _connect() as conn:
             row = _session_row(conn, _clean_session_id(session_id))
@@ -3091,7 +3091,7 @@ def _too_generic_short_circuit(
     agent_name: str,
     english_query: str = "",
 ) -> str:
-    """Preskočí volanie providerov a uloží spoľahlivý nulový výsledok pre príliš všeobecný dotaz."""
+    """Skip the provider calls and store a reliable no-results record for a too-generic query."""
     payload = {
         "source_type": source_type,
         "status": "ok",
@@ -3125,7 +3125,7 @@ async def patent_evidence_to_session(
     source_type: str = "patent",
     english_query: str = "",
 ) -> str:
-    """Získa patentové dôkazy a uloží ich k aktuálnemu prieskumu."""
+    """Retrieve patent evidence and store it against the current research session."""
     english_query_clean = (english_query or "").strip()
     received_source = str(source_type or "").strip().lower()
     if received_source and received_source != "patent":
@@ -3190,7 +3190,7 @@ async def publication_evidence_to_session(
     source_type: str = "publication",
     english_query: str = "",
 ) -> str:
-    """Získa publikačné dôkazy a uloží ich k aktuálnemu prieskumu."""
+    """Retrieve publication evidence and store it against the current research session."""
     english_query_clean = (english_query or "").strip()
     received_source = str(source_type or "").strip().lower()
     if received_source and received_source != "publication":
@@ -3255,7 +3255,7 @@ async def web_evidence_to_session(
     source_type: str = "web",
     english_query: str = "",
 ) -> str:
-    """Získa webové dôkazy a uloží ich k aktuálnemu prieskumu."""
+    """Retrieve web evidence and store it against the current research session."""
     english_query_clean = (english_query or "").strip()
     received_source = str(source_type or "").strip().lower()
     if received_source and received_source != "web":
