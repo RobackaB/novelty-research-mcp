@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Every release keeps the 7 MCP tool interfaces (names, parameters, response shape)
 compatible with the exported Flowise architecture.
 
+## [0.9.6] Iteration-order audit and a standing determinism guard
+
+### Added
+
+- `tests/test_determinism.py`, a permanent guard against hash-order dependence returning anywhere. It digests two workloads — the retrieval-side filtering path and the storage-to-rendered-report path — and re-runs each in a fresh interpreter per `PYTHONHASHSEED`. Subprocesses are required: the seed is fixed for the life of a process, so an in-process loop cannot detect this class of bug. Fixtures are deliberately tie-heavy, because a workload with distinct scores never reaches a tie-break and would pass against broken code.
+
+### Audited, no change required
+
+- The codebase was searched for other places where set or dict iteration order could reach observable behaviour: an AST pass over `tools/` and `server*.py` flagged 379 candidate sites, each traced by hand. **No further correctness-affecting dependency was found.** `AUDIT.md` section 18 records every site and its verdict, including the tie-prone ones that are deterministic only because their input is an ordered list.
+- The first differential probe written for this audit was invalid: it passed even with the v0.9.5 bug deliberately reintroduced, because injecting pre-built evidence packs bypasses retrieval entirely. Both committed probes are now validated against that reintroduced bug.
+
+### Not done deliberately
+
+- `web_search.py:728` and `evidence_quality.py:107` are tie-prone and deterministic only because their callers pass ordered containers. Adding a final unique tie-break would make them robust rather than merely correct, but that changes current output ordering and is a behavioural change, not an audit finding.
+
 ## [0.9.5] Deterministic relevance and production-faithful measurement
 
 ### Fixed

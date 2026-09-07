@@ -834,7 +834,79 @@ miest. **Oprava:** deduplikácia aj podľa normalizovaného názvu.
 - Opakovaný beh celého workflow po každej oprave; výsledný report je uložený
   ako `docs/example-report.md`.
 
-## 18. Námety na ďalšie zlepšenia (nezaradené)
+## 18. Audit závislostí na poradí iterácie (v0.9.6)
+
+After the v0.9.5 nondeterminism fix, the whole codebase was audited for other
+places where the iteration order of an unordered container could reach
+externally observable behaviour. **Result: no further correctness-affecting
+dependency was found.** This section records what was checked and how, so the
+negative result is verifiable rather than asserted.
+
+### 18.1 Metóda
+
+*Static.* An AST pass over `tools/*.py` and `server*.py` — not grep, which misses
+comprehensions and chained calls — flagged 379 candidate sites across `sorted`,
+`min`/`max`, `next`, `join`, and slicing. Each was then traced by hand to
+determine whether an unordered value can actually reach it.
+
+*Dynamic.* Two workloads were digested and re-run in a fresh interpreter per
+`PYTHONHASHSEED`, because the seed is fixed for the life of a process and a
+single-process loop cannot detect this class of bug at all.
+
+**The first dynamic probe was wrong, and that matters.** A probe driving the full
+workflow through `research_session_save_evidence` produced identical output
+across 12 seeds — but so did it with the v0.9.5 bug deliberately reintroduced.
+Injecting pre-built evidence packs bypasses retrieval and filtering entirely, so
+the probe never reached the code the bug lived in. A second probe targeting the
+filtering path directly was then validated the same way, and with the bug
+reintroduced it produced **12 different digests for 12 seeds**.
+
+Both probes are now permanent tests (`tests/test_determinism.py`). Every
+differential check of this kind must be validated against a known bug before its
+passing result means anything.
+
+### 18.2 Čo bolo nájdené
+
+| Site | Verdict |
+|---|---|
+| `relevance.py` `salient_query_tokens` | Fixed in v0.9.5. |
+| `patent_search.py:482` `sorted(ranked, key=(-score, patent_number))` | Safe — explicit unique tie-break. |
+| `patent_search.py` `_dedupe` | Safe — sets used for membership tests only; output order follows the input list. |
+| `_hit_sort.py` `sort_hits_by_relevance` | Tie-prone `(rank, score)` key, but input is a list and the sort is stable. Deterministic. |
+| `evidence_quality.py:107` `scored_hits[0]` | Tie-prone — decides which hit is "top" and reaches the output. Input is a list, so deterministic. |
+| `publications_search.py:757` `rejected.sort(key=score)` | Tie-prone — decides which rejected candidates are restored. Input is a list. Deterministic. |
+| `web_search.py:728` `sorted(merged_results.values(), key=(-score, _rank_domain(url)))` | `_rank_domain` returns `(int, domain)`, so ties survive only for equal score *and* equal domain, falling back to dict insertion order. Deterministic, but the narrowest margin in the codebase. |
+| `query_expansion.py:63` `sorted(_MAPPING, key=-len)` | Heavy ties, but `_MAPPING` is built from a tuple and a dict literal with `tuple(sorted(...))` values, so insertion order is deterministic. |
+| `research_session.py:905` `sorted(other_atoms, key=binary)` | Binary key, near-total ties, list input, stable sort. Deterministic. |
+| 9 keyless `sorted()` calls over sets | Safe by construction — alphabetical or numeric order. |
+| SQL view `deduped_best_evidence_view` | Safe — `ORDER BY verified_url DESC, relevance_score DESC, id ASC` ends in a unique column. |
+
+No occurrence of `list(set(...))` or `tuple(set(...))` exists anywhere in the
+codebase, and no `next(iter(...))` over an unordered container.
+
+The recurring reason nothing else broke is that this codebase already sorts sets
+*without* a key in the places it converts them to output, which yields
+alphabetical order. `salient_query_tokens` was the outlier precisely because it
+needed a ranking key, and that is where the secondary key was forgotten.
+
+### 18.3 Vedome nezmenené
+
+`web_search.py:728` and `evidence_quality.py:107` are deterministic today but rely
+on the caller passing an ordered container. Adding a final unique tie-break
+(`url`, `canonical_id`) would make them robust rather than merely correct — but
+it would change the current output ordering, which is a behavioural change and
+was therefore not made as part of an audit. Recorded here as a candidate.
+
+### 18.4 Overenie
+
+- `python -m pytest` — **278 passed**, unchanged across `PYTHONHASHSEED` values
+  0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144.
+- Both digests identical across 20 seeds.
+- Negative control: reverting the v0.9.5 fix makes
+  `test_filtering_path_is_hash_order_independent` fail with 8 distinct digests.
+- The guard costs about 9 s (16 subprocess spawns); the suite runs in ~13 s.
+
+## 19. Námety na ďalšie zlepšenia (nezaradené)
 
 - Znovupoužitie jednej Playwright browser inštancie namiesto spúšťania novej pre každý fetch.
 - Perzistentná (SQLite) cache pre patent_fetch medzi reštartmi kontajnera.
