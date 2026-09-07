@@ -1,16 +1,16 @@
-"""Deterministická expanzia dotazu o synonymá a rozpisy akronymov.
+"""Deterministic query expansion with synonyms and acronym expansions.
 
-Modul vypĺňa pole `synonyms` v query envelope (doteraz vždy prázdne)
-a generuje dodatočné vyhľadávacie varianty pre retry pokusy. Lexikón je
-zámerne malý a obsahuje len vysoko spoľahlivé technické ekvivalenty,
-aby varianty nemenili význam dotazu.
+Fills the `synonyms` field of the query envelope, which was previously always
+empty, and generates additional search variants for retry attempts. The lexicon
+is deliberately small and holds only highly reliable technical equivalents, so
+that a variant never changes what the query means.
 """
 
 from __future__ import annotations
 
 import re
 
-# Obojsmerné technické synonymá; kľúč aj hodnoty sú frázy v lowercase.
+# Bidirectional technical synonyms; both keys and values are lowercase phrases.
 _SYNONYM_PAIRS: tuple[tuple[str, str], ...] = (
     ("smart", "intelligent"),
     ("mobile application", "smartphone app"),
@@ -26,7 +26,7 @@ _SYNONYM_PAIRS: tuple[tuple[str, str], ...] = (
     ("unmanned aerial vehicle", "drone"),
 )
 
-# Akronymy a ich rozpisy; expanzia funguje oboma smermi.
+# Acronyms and their expansions; expansion works in both directions.
 _ACRONYMS: dict[str, str] = {
     "iot": "internet of things",
     "ml": "machine learning",
@@ -47,7 +47,7 @@ _ACRONYMS: dict[str, str] = {
 
 
 def _build_mapping() -> dict[str, tuple[str, ...]]:
-    """Zostaví obojsmernú mapu fráz na ich ekvivalenty."""
+    """Build a bidirectional map from phrases to their equivalents."""
     mapping: dict[str, set[str]] = {}
     for left, right in _SYNONYM_PAIRS:
         mapping.setdefault(left.lower(), set()).add(right)
@@ -59,17 +59,17 @@ def _build_mapping() -> dict[str, tuple[str, ...]]:
 
 
 _MAPPING = _build_mapping()
-# Dlhšie frázy skúšame skôr, aby "mobile application" malo prednosť pred "application".
+# Longer phrases are tried first so "mobile application" wins over "application".
 _PHRASES_BY_LENGTH = sorted(_MAPPING, key=lambda phrase: -len(phrase))
 
 
 def _phrase_pattern(phrase: str) -> re.Pattern[str]:
-    """Vytvorí regex vzor pre celofrázovú zhodu bez ohľadu na veľkosť písmen."""
+    """Build a case-insensitive regex pattern matching a whole phrase."""
     return re.compile(rf"\b{re.escape(phrase)}\b", flags=re.IGNORECASE)
 
 
 def applicable_synonyms(query: str, max_terms: int = 8) -> list[str]:
-    """Vráti ekvivalentné termíny pre frázy, ktoré sa nachádzajú v dotaze."""
+    """Return equivalent terms for the phrases that occur in the query."""
     text = (query or "").lower()
     found: list[str] = []
     seen: set[str] = set()
@@ -90,10 +90,11 @@ def applicable_synonyms(query: str, max_terms: int = 8) -> list[str]:
 
 
 def synonym_query_variants(query: str, max_variants: int = 2) -> list[str]:
-    """Vytvorí varianty dotazu so zamenenými synonymami alebo akronymami.
+    """Build query variants with synonyms or acronyms substituted in.
 
-    Každý variant nahrádza výskyty jednej frázy jej ekvivalentom, aby
-    zostal význam dotazu zachovaný a varianty boli čitateľné.
+    Each variant replaces the occurrences of a single phrase with its
+    equivalent, which keeps the meaning of the query intact and keeps the
+    variants readable.
     """
     original = re.sub(r"\s+", " ", str(query or "")).strip()
     if not original:

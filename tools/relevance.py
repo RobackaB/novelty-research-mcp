@@ -1,4 +1,4 @@
-"""Lokálne hodnotenie relevancie nájdených dôkazov."""
+"""Local relevance scoring for retrieved evidence."""
 
 from __future__ import annotations
 
@@ -34,16 +34,16 @@ BROAD_QUERY_TERMS = STOPWORDS | PATENT_STRUCTURAL | PUBLICATION_STRUCTURAL | WEB
     "development", "prior", "art", "results",
 }
 THRESHOLDS: dict[EvidenceType, float] = {"PATENT": 3.0, "PUBLICATION": 3.0, "WEB": 2.8}
-# Pod týmto počtom kandidátov nemá výpočet vzácnosti termínov štatistický zmysel.
+# Below this many candidates, term-rarity weighting has no statistical meaning.
 _MIN_CORPUS_FOR_IDF = 3
 _DEFAULT_IDF_WEIGHT = 1.0
 
 
-# Množné číslo sa odstraňuje ako prvé. Pôvodné poradie spôsobovalo, že
-# "application" -> "applicate", ale "applications" -> "application", takže
-# jednotné a množné číslo toho istého slova sa nikdy nezhodovali. Podobne
-# strážna podmienka na dĺžku 4 nechávala "logs" nezmenené, zatiaľ čo "log"
-# zostávalo "log" — dokument o logoch tak nedostal voči dotazu žiadny kredit.
+# Plurals are stripped first. The original ordering turned "application" into
+# "applicate" but "applications" into "application", so the singular and plural
+# of the same word never matched. Likewise the length-4 guard left "logs"
+# untouched while "log" stayed "log", so a document about logs earned no credit
+# against a query mentioning logs.
 _PLURAL_RULES = (
     ("ies", "y"),
     ("sses", "ss"),
@@ -70,7 +70,7 @@ _DERIVATIONAL_RULES = (
 
 
 def _stem(token: str) -> str:
-    """Zjednoduší anglický token na približný koreň slova."""
+    """Reduce an English token to an approximate word stem."""
     if len(token) <= 3:
         return token
     if not token.endswith("ss"):
@@ -87,7 +87,7 @@ def _stem(token: str) -> str:
 
 
 def tokens(text: str) -> set[str]:
-    """Rozdelí text na jednoduché normalizované tokeny."""
+    """Split text into simple normalised tokens."""
     return {
         _stem(token)
         for token in re.findall(r"[a-z0-9]+", (text or "").lower())
@@ -96,17 +96,17 @@ def tokens(text: str) -> set[str]:
 
 
 def build_corpus_idf(documents: list[str]) -> dict[str, float]:
-    """Vypočíta váhu termínov podľa ich vzácnosti v množine kandidátov.
+    """Weight query terms by how rare they are within the candidate set.
 
-    Bez tejto váhy má každý termín dotazu rovnakú dôležitosť, takže dokument
-    z úplne inej domény prejde len vďaka zdieľanej generickej slovnej zásobe
-    (napríklad "machine", "learning", "real", "time", "detection"). Termíny,
-    ktoré sa vyskytujú takmer vo všetkých kandidátoch, nenesú rozlišovaciu
-    informáciu a dostávajú nižšiu váhu; vzácne doménové termíny vyššiu.
+    Without this weighting every query term counts equally, so a document from a
+    completely different domain can pass on shared generic vocabulary alone (for
+    example "machine", "learning", "real", "time", "detection"). Terms occurring
+    in nearly every candidate carry no discriminating information and are given a
+    lower weight; rare domain terms are given a higher one.
 
-    Zámerne sa počíta nad práve získanou množinou kandidátov, nie nad pevným
-    zoznamom slov — systém tak zostáva bez zabudovaných doménových slovníkov
-    a prispôsobí sa ľubovoľnej téme dotazu.
+    The weights are computed over the candidate set just retrieved rather than a
+    fixed word list. That keeps the system free of built-in domain vocabularies
+    and lets it adapt to whatever topic the query is about.
     """
     doc_token_sets = [tokens(document) for document in documents if (document or "").strip()]
     total = len(doc_token_sets)
@@ -125,7 +125,7 @@ def build_corpus_idf(documents: list[str]) -> dict[str, float]:
 def _weighted_overlap_ratio(
     query_tokens: set[str], overlap: set[str], idf: dict[str, float] | None
 ) -> float:
-    """Určí podiel pokrytia dotazu, prípadne vážený vzácnosťou termínov."""
+    """Return the share of the query covered, optionally weighted by term rarity."""
     if not idf:
         return len(overlap) / len(query_tokens)
     total_weight = sum(idf.get(token, _DEFAULT_IDF_WEIGHT) for token in query_tokens)
@@ -142,7 +142,7 @@ def evidence_score(
     evidence_level: str | None = None,
     idf: dict[str, float] | None = None,
 ) -> float:
-    """Vypočíta orientačné skóre relevancie textu voči dotazu."""
+    """Compute an approximate relevance score for a text against a query."""
     query_tokens = tokens(query)
     text_tokens = tokens(text)
     if not query_tokens or not text_tokens:
@@ -164,7 +164,7 @@ def evidence_score(
 
 
 def discriminative_tokens(query: str) -> set[str]:
-    """Vráti tokeny dotazu bez všeobecných a štruktúrnych slov."""
+    """Return the query tokens with generic and structural words removed."""
     return {token for token in tokens(query) if token not in BROAD_QUERY_TERMS and len(token) >= 3}
 
 
@@ -175,7 +175,7 @@ _GENERIC_MECHANISM_NORMALIZED = frozenset(
 
 
 def _strip_mechanism(token: str) -> bool:
-    """Určí, či token opisuje skôr všeobecný mechanizmus než predmet dotazu."""
+    """Decide whether a token describes a generic mechanism rather than the subject."""
     if token in _GENERIC_MECHANISM_NORMALIZED:
         return True
     parts = [part for part in re.split(r"[-_/]+", token) if part]
@@ -188,16 +188,16 @@ def _strip_mechanism(token: str) -> bool:
 
 
 def subject_anchors(query_terms: set[str]) -> set[str]:
-    """Vyberie z dotazu tokeny, ktoré najviac určujú jeho predmet."""
+    """Select the tokens that most define what the query is about."""
     return {token for token in query_terms if not _strip_mechanism(token)}
 
 
 def salient_query_tokens(query: str, idf: dict[str, float], top_n: int = 6) -> set[str]:
-    """Vyberie najrozlišujúcejšie termíny dotazu podľa ich vzácnosti v korpuse.
+    """Select the query's most discriminating terms by their rarity in the corpus.
 
-    Slúži ako doménová kotva: dokument, ktorý neobsahuje ani jeden z termínov
-    najviac špecifických pre daný dotaz, je tematicky inde, aj keď zdieľa
-    generickú metodickú slovnú zásobu.
+    These act as a domain anchor: a document containing none of the terms most
+    specific to the query is about something else, even when it shares generic
+    methodological vocabulary.
     """
     candidates = discriminative_tokens(query) or tokens(query)
     if not idf or not candidates:
@@ -220,7 +220,7 @@ def is_relevant(
     threshold: float | None = None,
     idf: dict[str, float] | None = None,
 ) -> bool:
-    """Overí, či text spĺňa minimálnu hranicu relevancie voči dotazu."""
+    """Check whether a text meets the minimum relevance threshold for a query."""
     text_tokens = tokens(text)
     if evidence_type == "PUBLICATION":
         query_tokens = tokens(query)
