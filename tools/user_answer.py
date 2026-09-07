@@ -246,6 +246,10 @@ def _section_labels(language: str) -> dict[str, str]:
             "uncertainty_partial": "Vyhľadávanie bolo čiastočné - niektoré zdroje vrátili chyby alebo iba slabé výsledky.",
             "uncertainty_complete": "Toto je deterministická rešerš a nie právne stanovisko k patentovateľnosti.",
             "coverage_label": "Pokrytie kritických požiadaviek",
+            "element_column": "Prvok",
+            "status_column": "Stav",
+            "strongest_source_column": "Najsilnejší zdroj",
+            "unspecified_label": "(neuvedený)",
             "no_critical_reqs": "Pre tento dotaz neboli automaticky extrahované konkrétne kritické požiadavky.",
             "novelty_cannot_assess": "Nedá sa spoľahlivo posúdiť pri čiastočnom vyhľadávaní.",
             "flaws_no_data": "Žiadne dostupné údaje v dátach neumožňujú spoľahlivo identifikovať konkrétne nedostatky existujúcich riešení.",
@@ -300,6 +304,10 @@ def _section_labels(language: str) -> dict[str, str]:
         "uncertainty_partial": "Retrieval was partial - some sources returned errors or only weak results, so absence of strong matches is not the same as absence of prior art.",
         "uncertainty_complete": "This is a deterministic research summary, not a patentability legal opinion.",
         "coverage_label": "Critical requirement coverage",
+        "element_column": "Element",
+        "status_column": "Status",
+        "strongest_source_column": "Strongest source",
+        "unspecified_label": "(unspecified)",
         "no_critical_reqs": "No specific critical requirements were automatically extracted from this query.",
         "novelty_cannot_assess": "Cannot be reliably assessed under partial retrieval.",
         "flaws_no_data": "No retrieved data allows reliable identification of specific flaws in existing solutions.",
@@ -673,10 +681,13 @@ def _render_uncertainty_section(
             no_source_word = "no source"
         lines.append(header)
         lines.append("")
-        lines.append("| Element | Status | Strongest source | Evidence level |")
+        lines.append(
+            f"| {labels['element_column']} | {labels['status_column']} "
+            f"| {labels['strongest_source_column']} | {labels['evidence']} |"
+        )
         lines.append("|---|---|---|---|")
         for row in per_requirement_status:
-            label = _sanitize_text(row.get("label") or "", 80) or "(unspecified)"
+            label = _sanitize_text(row.get("label") or "", 80) or labels["unspecified_label"]
             category = str(row.get("category") or "").replace("_", " ")
             full_label = f"{label} ({category})" if category else label
             status = status_words.get(row.get("status", ""), row.get("status", ""))
@@ -685,7 +696,7 @@ def _render_uncertainty_section(
             lines.append(f"| {full_label} | {status} | {source} | `{level}` |")
         not_full = [
             (
-                _sanitize_text(row.get("label") or "", 80) or "(unspecified)",
+                _sanitize_text(row.get("label") or "", 80) or labels["unspecified_label"],
                 status_words.get(row.get("status", ""), row.get("status", "")),
             )
             for row in per_requirement_status
@@ -693,7 +704,7 @@ def _render_uncertainty_section(
         ]
         if not_full:
             lines.append("")
-            prefix = "Nie uplne overene prvky:" if language == "sk" else "Not fully verified elements:"
+            prefix = "Nie úplne overené prvky:" if language == "sk" else "Not fully verified elements:"
             details = "; ".join(f"{label} ({status})" for label, status in not_full)
             lines.append(f"{prefix} {details}.")
         return lines
