@@ -7,7 +7,9 @@ import json
 from tools.user_answer import (
     _detect_language,
     _pseudo_atoms_from_requirements,
+    _render_uncertainty_section,
     _sanitize_summary,
+    _section_labels,
     _trim_to_words,
     build_user_answer_payload,
 )
@@ -154,3 +156,66 @@ def test_failed_pack_yields_partial_retrieval():
     payload = build_user_answer_payload(merged_pack="not json at all", original_query="query")
     assert payload["verdict"] == "partial_retrieval"
     assert payload["confidence"] == "low"
+
+
+# --- Localisation of the requirement-coverage section -------------------------
+
+_PER_REQUIREMENT_ROWS = [
+    {"label": "", "status": "not_verified"},  # forces the missing-label fallback
+    {"label": "prístupové kódy", "status": "partially_indicated"},
+    {"label": "mobilná aplikácia", "status": "verified"},
+]
+
+# English strings that must never appear in Slovak output. This section assembles
+# its table and its element list piece by piece, so it is easy to localise only
+# half of it -- which is exactly what had happened before this fix.
+_ENGLISH_FRAGMENTS = (
+    "Element",
+    "Status",
+    "Strongest source",
+    "Evidence level",
+    "unspecified",
+    "no source",
+    "Not fully verified",
+    "verified",
+    "partially indicated",
+)
+
+
+def _render(language):
+    return "\n".join(
+        _render_uncertainty_section(
+            "complete", [], {}, _section_labels(language), _PER_REQUIREMENT_ROWS, language
+        )
+    )
+
+
+def test_slovak_per_requirement_section_is_fully_localised():
+    """Slovak output of this section must contain no English leftovers.
+
+    The table header was hardcoded English and so was the missing-label fallback,
+    so a Slovak report carried five English fragments. Asserting the absence of
+    English is broader than checking for specific strings: it also catches any
+    unlocalised field added here later.
+    """
+    output = _render("sk")
+    assert "| Prvok | Stav | Najsilnejší zdroj | Úroveň dôkazu |" in output
+    assert "(neuvedený)" in output
+    assert "Nie úplne overené prvky:" in output
+    leaked = [fragment for fragment in _ENGLISH_FRAGMENTS if fragment in output]
+    assert not leaked, f"English leftovers in Slovak output: {leaked}"
+
+
+def test_slovak_prefix_uses_diacritics():
+    """The prefix was written without diacritics though the status words above it had them."""
+    output = _render("sk")
+    assert "Nie úplne overené prvky:" in output
+    assert "Nie uplne overene prvky:" not in output
+
+
+def test_english_per_requirement_section_is_unchanged():
+    """Localising Slovak must not alter the English output."""
+    output = _render("en")
+    assert "| Element | Status | Strongest source | Evidence level |" in output
+    assert "(unspecified)" in output
+    assert "Not fully verified elements:" in output
