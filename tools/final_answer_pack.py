@@ -1,4 +1,4 @@
-"""Vytváranie výslednej odpovede zo zlúčených dôkazov."""
+"""Building the final answer from merged evidence."""
 
 from __future__ import annotations
 
@@ -13,17 +13,17 @@ WARNING_DISPLAY_LIMIT = 240
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
-    """Vráti hodnotu ako slovník alebo prázdny slovník."""
+    """Return the value as a dict, or an empty dict."""
     return value if isinstance(value, dict) else {}
 
 
 def _as_list(value: Any) -> list[Any]:
-    """Vráti hodnotu ako zoznam alebo prázdny zoznam."""
+    """Return the value as a list, or an empty list."""
     return value if isinstance(value, list) else []
 
 
 def _decode_string_payload(text: str) -> Any:
-    """Načíta textový vstup, ktorý môže obsahovať vnorené štruktúrované dáta."""
+    """Parse a text input that may contain nested structured data."""
     current: Any = text
     for _ in range(3):
         if not isinstance(current, str):
@@ -45,7 +45,7 @@ def _decode_string_payload(text: str) -> Any:
 
 
 def _unwrap_payload(value: Any) -> Any:
-    """Rozbalí bežné Flowise alebo MCP wrappery a vráti ich vnútorný obsah."""
+    """Unwrap the common Flowise or MCP wrappers and return their inner content."""
     if isinstance(value, str):
         decoded = _decode_string_payload(value)
         if isinstance(decoded, dict) and decoded.get("raw") == value:
@@ -87,7 +87,7 @@ def _unwrap_payload(value: Any) -> Any:
 
 
 def _parse_pack(value: Any) -> dict[str, Any]:
-    """Načíta zlúčený evidence pack z wrapperov alebo textového vstupu."""
+    """Parse the merged evidence pack out of wrappers or text input."""
     unwrapped = _unwrap_payload(value)
     parsed = _safe_parse(unwrapped)
     if isinstance(parsed, dict):
@@ -120,7 +120,7 @@ def _parse_pack(value: Any) -> dict[str, Any]:
 
 
 def normalize_final_response(value: Any) -> str:
-    """Prevedie výslednú odpoveď na čistý textový výstup."""
+    """Convert the final answer into plain text output."""
     unwrapped = _unwrap_payload(value)
     if isinstance(unwrapped, str):
         return unwrapped
@@ -130,7 +130,7 @@ def normalize_final_response(value: Any) -> str:
 
 
 def _missing_source(source_type: str) -> dict[str, Any]:
-    """Vytvorí prázdny zdrojový blok pre chýbajúci vstup."""
+    """Build an empty source block for a missing input."""
     return {
         "source_type": source_type,
         "status": "failed",
@@ -143,7 +143,7 @@ def _missing_source(source_type: str) -> dict[str, Any]:
 
 
 def _one_line(text: Any, limit: int = 360) -> str:
-    """Skráti hodnotu na jeden riadok s maximálnou dĺžkou."""
+    """Truncate a value to a single line of bounded length."""
     collapsed = " ".join(_clean_text_field(text).split())
     if len(collapsed) <= limit:
         return collapsed
@@ -151,7 +151,7 @@ def _one_line(text: Any, limit: int = 360) -> str:
 
 
 def _clean_text_field(text: Any) -> str:
-    """Odstráni z textového poľa zvyšky serializovaného JSON obsahu."""
+    """Strip leftover serialised JSON content from a text field."""
     value = str(text or "")
     for marker in (
         '\\"verified_url\\":',
@@ -177,7 +177,7 @@ def _clean_text_field(text: Any) -> str:
 
 
 def _coerce_hit_list(value: Any) -> list[Any]:
-    """Prevedie vstup s nálezmi na zoznam nálezov, ak to jeho tvar umožňuje."""
+    """Convert a hits input into a list of hits where its shape allows."""
     if isinstance(value, list):
         return value
     parsed = _unwrap_payload(value)
@@ -191,7 +191,7 @@ def _coerce_hit_list(value: Any) -> list[Any]:
 
 
 def _source_section(source: dict[str, Any], label: str, hits: list[dict[str, Any]]) -> list[str]:
-    """Vytvorí textovú sekciu pre jeden zdroj dôkazov."""
+    """Build the text section for one evidence source."""
     lines = [
         f"Status: `{source.get('status', 'failed')}`, completed: `{source.get('completed') is True}`, reliable_no_results: `{source.get('reliable_no_results') is True}`."
     ]
@@ -223,7 +223,7 @@ def _source_section(source: dict[str, Any], label: str, hits: list[dict[str, Any
 
 
 def _valid_hits(source: dict[str, Any]) -> list[dict[str, Any]]:
-    """Vyberie a očistí použiteľné nálezy zo zdrojového bloku."""
+    """Select and clean the usable hits from a source block."""
     hits: list[dict[str, Any]] = []
     for hit in _coerce_hit_list(source.get("hits")):
         hit_dict = _as_dict(hit)
@@ -245,12 +245,12 @@ def _valid_hits(source: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _focused_publication_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Vyfiltruje publikácie s fokusovanou relevanciou."""
+    """Filter the publications down to those with focused relevance."""
     return [hit for hit in hits if str(hit.get("relevance") or "").lower() == "focused"]
 
 
 def _warnings_errors(pack: dict[str, Any]) -> list[str]:
-    """Zhrnie varovania a chyby zo zlúčeného packu."""
+    """Summarise the warnings and errors from the merged pack."""
     warnings = [_one_line(item, WARNING_DISPLAY_LIMIT) for item in _as_list(pack.get("warnings")) if item]
     errors = [_one_line(item, WARNING_DISPLAY_LIMIT) for item in _as_list(pack.get("errors")) if item]
     lines: list[str] = []
@@ -262,7 +262,7 @@ def _warnings_errors(pack: dict[str, Any]) -> list[str]:
 
 
 def _direct_answer(pack: dict[str, Any], patent_hits: list[dict[str, Any]], publication_hits: list[dict[str, Any]], web_hits: list[dict[str, Any]]) -> str:
-    """Vytvorí stručnú konzervatívnu odpoveď podľa dostupných nálezov."""
+    """Build a brief conservative answer from the available hits."""
     status = pack.get("overall_status", "failed")
     if status == "failed":
         return (
@@ -284,7 +284,7 @@ def _direct_answer(pack: dict[str, Any], patent_hits: list[dict[str, Any]], publ
 
 
 def final_answer_pack(merged_pack: Any, original_query: str = "", draft_answer: str = "") -> str:
-    """Vytvorí konzervatívnu výslednú odpoveď zo zlúčeného wrapperu dôkazov."""
+    """Build a conservative final answer from the merged evidence wrapper."""
     pack = _parse_pack(merged_pack)
     query = _one_line(original_query or pack.get("query"))
     patents = _as_dict(pack.get("patents")) or _missing_source("patent")
