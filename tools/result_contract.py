@@ -1,4 +1,4 @@
-"""Spoločné značky a stavové informácie pre výsledky vyhľadávania."""
+"""Shared markers and status information for search results."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ WEAK_EVIDENCE_LEVELS = {"search_snippet_only", "citation_only"}
 FAILED_EVIDENCE_LEVELS = {"fetch_timeout", "fetch_failed", "provider_error"}
 
 def evidence_level_multiplier(evidence_level: str | None) -> float:
-    """Vráti váhu dôkazovej úrovne pre lokálne skórovanie."""
+    """Return the weight of an evidence level for local scoring."""
     return EVIDENCE_LEVEL_MULTIPLIER.get(str(evidence_level or "").strip().lower(), 0.7)
 
 @dataclass
@@ -70,11 +70,11 @@ class NormalizedResult:
     notes: list[str] = field(default_factory=list)
 
 def _bool(value: bool) -> str:
-    """Prevedie pravdivostnú hodnotu na text používaný vo výstupe."""
+    """Convert a boolean into the text form used in output."""
     return "TRUE" if value else "FALSE"
 
 def status_markers(result: NormalizedResult) -> str:
-    """Vytvorí štandardné stavové informácie pre výstup nástroja."""
+    """Build the standard status information for a tool's output."""
     lines = [
         f"STATUS: {result.status.upper()}",
         f"COMPLETED: {_bool(result.completed)}",
@@ -90,32 +90,32 @@ def status_markers(result: NormalizedResult) -> str:
     return "\n".join(lines)
 
 def prepend_markers(result: NormalizedResult, body: str) -> str:
-    """Pridá stavové informácie pred textový obsah výsledku."""
+    """Prepend status information to the textual body of a result."""
     return f"{status_markers(result)}\n\n{body.strip()}".strip()
 
 def parse_status_marker(text: str) -> str | None:
-    """Prečíta stav nástroja zo stavových informácií."""
+    """Read the tool status out of the status markers."""
     found = re.search(r"^STATUS:\s*([A-Z_]+)\s*$", text or "", flags=re.I | re.M)
     return found.group(1).lower() if found else None
 
 def parse_completed_marker(text: str) -> bool | None:
-    """Prečíta informáciu o dokončení zo stavových informácií."""
+    """Read the completion flag out of the status markers."""
     found = re.search(r"^COMPLETED:\s*(TRUE|FALSE)\s*$", text or "", flags=re.I | re.M)
     return found.group(1).upper() == "TRUE" if found else None
 
 def parse_reliable_no_results_marker(text: str) -> bool | None:
-    """Prečíta informáciu o spoľahlivom nulovom výsledku."""
+    """Read the reliable-no-results flag out of the status markers."""
     found = re.search(r"^RELIABLE_NO_RESULTS:\s*(TRUE|FALSE)\s*$", text or "", flags=re.I | re.M)
     return found.group(1).upper() == "TRUE" if found else None
 
 
 def parse_error_count(text: str) -> int | None:
-    """Prečíta počet chýb zo stavových informácií."""
+    """Read the error count out of the status markers."""
     found = re.search(r"^ERROR_COUNT:\s*(\d+)\s*$", text or "", flags=re.I | re.M)
     return int(found.group(1)) if found else None
 
 def has_hits(text: str) -> bool:
-    """Zistí, či text výsledku obsahuje aspoň jeden zdrojový odkaz."""
+    """Determine whether a result body contains at least one source link."""
     if not text:
         return False
     body = re.sub(r"^(STATUS|COMPLETED|RELIABLE_NO_RESULTS|ERROR_COUNT|QUERY|ERROR|NOTE):.*$", "", text, flags=re.I | re.M)

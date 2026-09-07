@@ -1,8 +1,8 @@
-"""Zdieľané porovnávanie atomických požiadaviek dotazu s textom dôkazu.
+"""Shared matching of a query's atomic requirements against evidence text.
 
-Modul poskytuje jednotnú, stemming-aware logiku pre výpočet pokrytia
-požiadaviek naprieč patentovým, publikačným aj webovým evidence packom
-a finálnym reportom, aby všetky časti systému merali pokrytie rovnako.
+Provides one stemming-aware implementation of requirement coverage used by the
+patent, publication and web evidence packs and by the final report, so that
+every part of the system measures coverage the same way.
 """
 
 from __future__ import annotations
@@ -36,8 +36,8 @@ _STEM_NORMALIZATION = {
     "scheduling": "schedule",
 }
 
-# Poradie je dôležité: špecifické plurálové prípony pred všeobecným "s",
-# aby "codes" -> "code" a zároveň "batches" -> "batch".
+# Order matters: specific plural endings before the general "s", so that
+# "codes" -> "code" and "batches" -> "batch" both work.
 _STEM_SUFFIXES = (
     ("ies", "y"),
     ("sses", "ss"),
@@ -50,7 +50,7 @@ _STEM_SUFFIXES = (
 
 
 def stem_requirement_token(token: str) -> str:
-    """Upraví token požiadavky do tvaru vhodného na porovnávanie."""
+    """Normalise a requirement token into a comparable form."""
     token = token.lower().strip()
     if token in _STEM_NORMALIZATION:
         return _STEM_NORMALIZATION[token]
@@ -63,7 +63,7 @@ def stem_requirement_token(token: str) -> str:
 
 
 def blob_tokens(text: str) -> set[str]:
-    """Vytvorí množinu tokenov a ich normalizovaných tvarov z textu."""
+    """Build the set of tokens and their normalised forms from a text."""
     tokens = re.findall(r"[a-z0-9]+", (text or "").lower())
     out: set[str] = set()
     for token in tokens:
@@ -73,7 +73,7 @@ def blob_tokens(text: str) -> set[str]:
 
 
 def part_matches(part: str, tokens: set[str]) -> bool:
-    """Overí, či sa jedna časť požiadavky zhoduje s tokenmi v texte."""
+    """Check whether one part of a requirement matches the tokens in a text."""
     part = part.lower().strip()
     if not part:
         return False
@@ -81,7 +81,7 @@ def part_matches(part: str, tokens: set[str]) -> bool:
 
 
 def term_matches_blob(term: str, tokens: set[str], compact_blob: str) -> bool:
-    """Overí, či sa výraz požiadavky zhoduje s textovým blokom nálezu."""
+    """Check whether a requirement term matches a hit's text block."""
     parts = re.findall(r"[a-z0-9]+", str(term or "").lower())
     if not parts:
         return False
@@ -92,7 +92,7 @@ def term_matches_blob(term: str, tokens: set[str], compact_blob: str) -> bool:
 
 
 def requirement_match_strength(terms: list[str], text: str) -> str:
-    """Určí, či text pokrýva požiadavku úplne, čiastočne alebo vôbec."""
+    """Determine whether a text covers a requirement fully, partially or not at all."""
     cleaned_terms = [str(term).lower().strip() for term in terms if str(term).strip()]
     if not cleaned_terms:
         return "none"
@@ -107,7 +107,7 @@ def requirement_match_strength(terms: list[str], text: str) -> str:
 
 
 def _atom_term_sets(atomic_requirements: list[dict[str, Any]] | None) -> list[list[str]]:
-    """Pripraví zoznamy termínov z atomických požiadaviek."""
+    """Prepare the term lists from the atomic requirements."""
     if not atomic_requirements:
         return []
     term_sets: list[list[str]] = []
@@ -122,11 +122,11 @@ def _atom_term_sets(atomic_requirements: list[dict[str, Any]] | None) -> list[li
 
 
 def atom_coverage(text: str, atomic_requirements: list[dict[str, Any]] | None) -> tuple[float, int]:
-    """Vypočíta podiel atomických požiadaviek plne pokrytých textom.
+    """Compute the share of atomic requirements fully covered by a text.
 
-    Vracia dvojicu (pokrytie 0.0-1.0 zaokrúhlené na 4 miesta, počet plne
-    pokrytých požiadaviek). Text bez obsahu alebo prázdne požiadavky
-    vracajú (0.0, 0).
+    Returns a pair: coverage from 0.0 to 1.0 rounded to 4 places, and the count
+    of fully covered requirements. An empty text or an empty requirement list
+    returns (0.0, 0).
     """
     term_sets = _atom_term_sets(atomic_requirements)
     if not term_sets or not (text or "").strip():
@@ -142,7 +142,7 @@ def atom_coverage(text: str, atomic_requirements: list[dict[str, Any]] | None) -
 
 
 def covers_all_atoms(text: str, atomic_requirements: list[dict[str, Any]] | None) -> bool:
-    """Zistí, či text plne pokrýva všetky atomické požiadavky dotazu."""
+    """Determine whether a text fully covers every atomic requirement of the query."""
     term_sets = _atom_term_sets(atomic_requirements)
     if not term_sets:
         return False
@@ -151,11 +151,11 @@ def covers_all_atoms(text: str, atomic_requirements: list[dict[str, Any]] | None
 
 
 def unique_coverage_tokens(text: str, cap: int = 2500) -> str:
-    """Zhustí celý text dokumentu na unikátne tokeny pre výpočet pokrytia.
+    """Condense a whole document into unique tokens for coverage computation.
 
-    Pokrytie prvkov overuje prítomnosť termínov, takže deduplikované tokeny
-    zachovávajú výsledok zhody a pritom umožňujú preniesť obsah celej stránky
-    alebo dokumentu v kompaktnej podobe.
+    Coverage only tests for the presence of terms, so deduplicating the tokens
+    preserves the matching result while letting an entire page or document be
+    carried in a compact form.
     """
     tokens = re.findall(r"[a-z0-9][a-z0-9-]{1,}", (text or "").lower())
     out: list[str] = []

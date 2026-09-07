@@ -1,4 +1,4 @@
-"""Pomocné funkcie na čistenie vstupných dotazov z Flowise."""
+"""Helpers for cleaning up incoming queries from Flowise."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ _JSON_SYNTAX_RE = re.compile(r"[{}\[\]\"`]")
 
 
 def _extract_terms(value: Any, depth: int = 0) -> list[str]:
-    """Vytiahne textové časti dotazu z vnorených štruktúr."""
+    """Pull the textual parts of a query out of nested structures."""
     if depth > 6: 
         return []
     if value is None:
@@ -67,7 +67,7 @@ def _extract_terms(value: Any, depth: int = 0) -> list[str]:
 
 
 def _looks_like_serialized_structure(text: str) -> bool:
-    """Zistí, či text vyzerá ako serializovaný JSON alebo zoznam."""
+    """Determine whether a text looks like serialised JSON or a list."""
     s = (text or "").strip()
     if not s:
         return False
@@ -77,7 +77,7 @@ def _looks_like_serialized_structure(text: str) -> bool:
 
 
 def _strip_json_syntax(text: str) -> str:
-    """Odstráni zo vstupu JSON značky a technické štruktúrne slová."""
+    """Strip JSON punctuation and technical structural words from the input."""
     cleaned = _JSON_SYNTAX_RE.sub(" ", text or "")
     cleaned = re.sub(r"[:,]+", " ", cleaned)
     tokens = cleaned.split()
@@ -95,7 +95,7 @@ def _strip_json_syntax(text: str) -> str:
 
 
 def coerce_query_input(value: Any) -> str:
-    """Prevedie vstup z Flowise alebo MCP na čistý textový dotaz."""
+    """Convert input from Flowise or MCP into a plain text query."""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -122,7 +122,7 @@ def coerce_query_input(value: Any) -> str:
 
 
 def clean_tool_query(query: Any) -> str:
-    """Odstráni úvodný štítok bez zmeny samotného dotazu."""
+    """Remove a leading label without altering the query itself."""
     text = re.sub(r"\s+", " ", coerce_query_input(query)).strip()
     text = re.sub(r"^(?:query|question|input)\s*:\s*", "", text, count=1, flags=re.IGNORECASE).strip()
     if text.startswith("{") or text.startswith("["):
