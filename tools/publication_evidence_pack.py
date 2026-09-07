@@ -1,4 +1,4 @@
-"""Spracovanie publikačných dôkazov pre finálny prieskum."""
+"""Processing of publication evidence for the final research report."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ _ARXIV_ABS_RE = re.compile(r"arxiv\.org/abs/([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)", re
 
 
 def _direct_pdf_url(candidate: "PublicationCandidate") -> str:
-    """Určí priamu URL plného PDF textu bez sieťového vyhľadávania (arXiv, .pdf)."""
+    """Determine the direct full-text PDF URL without a network lookup (arXiv, .pdf)."""
     url = candidate.url or ""
     arxiv_match = _ARXIV_ABS_RE.search(url)
     if arxiv_match:
@@ -50,12 +50,12 @@ def _direct_pdf_url(candidate: "PublicationCandidate") -> str:
 
 
 async def _unpaywall_pdf_url(doi: str) -> str:
-    """Vyhľadá voľne dostupný PDF odkaz pre DOI cez bezplatné Unpaywall API.
+    """Look up an open-access PDF link for a DOI through the free Unpaywall API.
 
-    Bez API kľúča, ale vyžaduje kontaktný e-mail v dopyte (politika Unpaywall);
-    placeholder adresy v tvare *@example.com sú odmietnuté, preto sa používa
-    vlastná .local doména. Pri akejkoľvek chybe alebo zatvorenom prístupe
-    vráti prázdny reťazec.
+    No API key is needed, but Unpaywall's policy requires a contact e-mail in the
+    request. Placeholder addresses of the form *@example.com are rejected, so a
+    private .local domain is used instead. Any error, or a closed-access record,
+    returns an empty string.
     """
     clean_doi = (doi or "").strip().strip("/")
     if not clean_doi:
@@ -83,7 +83,7 @@ async def _unpaywall_pdf_url(doi: str) -> str:
 
 
 async def _resolve_pdf_url(candidate: "PublicationCandidate") -> str:
-    """Určí URL plného PDF textu publikácie priamo alebo cez Unpaywall podľa DOI."""
+    """Determine a publication's full-text PDF URL directly or via Unpaywall by DOI."""
     direct = _direct_pdf_url(candidate)
     if direct:
         return direct
@@ -114,18 +114,18 @@ class PublicationCandidate:
 
 
 def _clean_url(url: str) -> str:
-    """Očistí URL adresu od koncovej interpunkcie."""
+    """Strip trailing punctuation from a URL."""
     return (url or "").strip().rstrip(".,;")
 
 
 def _doi_from_url(url: str) -> str:
-    """Vytiahne DOI identifikátor z DOI URL adresy."""
+    """Extract the DOI identifier from a DOI URL."""
     match = re.search(r"https?://doi\.org/(.+)", url or "", flags=re.I)
     return match.group(1).rstrip(".,;") if match else ""
 
 
 def _parse_candidates(search_output: str) -> list[PublicationCandidate]:
-    """Vytiahne kandidátske publikácie z textového výstupu vyhľadávania."""
+    """Extract the candidate publications from the search tool's text output."""
     candidates: list[PublicationCandidate] = []
     seen: set[str] = set()
     for block in re.split(r"\n\s*\n", search_output or ""):
@@ -155,7 +155,7 @@ def _parse_candidates(search_output: str) -> list[PublicationCandidate]:
 
 
 def _verification_map(verification: str) -> dict[str, bool]:
-    """Prevedie výsledok overenia URL adries na slovník dostupnosti."""
+    """Convert the URL verification result into an availability map."""
     out: dict[str, bool] = {}
     for url, status in VERIFY_RE.findall(verification or ""):
         out[url.rstrip(".,;")] = status.upper() == "ALIVE"
@@ -163,13 +163,13 @@ def _verification_map(verification: str) -> dict[str, bool]:
 
 
 def _field(text: str, label: str) -> str:
-    """Získa hodnotu konkrétneho poľa z textového výstupu fetch nástroja."""
+    """Read the value of a specific field from a fetch tool's text output."""
     match = re.search(rf"^{re.escape(label)}:\s*(.*?)$", text or "", flags=re.I | re.M)
     return match.group(1).strip() if match else ""
 
 
 def _fetch_level(fetch_output: str) -> str:
-    """Prevedie hodnotu EVIDENCE_LEVEL z publication_fetch na jednotnú úroveň dôkazu."""
+    """Map the EVIDENCE_LEVEL value from publication_fetch onto the shared evidence level."""
     raw = _field(fetch_output, "EVIDENCE_LEVEL").upper()
     if raw == "ABSTRACT_VERIFIED":
         return "abstract_verified"
@@ -179,7 +179,7 @@ def _fetch_level(fetch_output: str) -> str:
 
 
 def _fetch_summary(fetch_output: str) -> str:
-    """Vytvorí krátke zhrnutie z výsledku publication_fetch."""
+    """Build a short summary from a publication_fetch result."""
     title = _field(fetch_output, "TITLE")
     abstract = _field(fetch_output, "ABSTRACT")
     parts = []
@@ -191,7 +191,7 @@ def _fetch_summary(fetch_output: str) -> str:
 
 
 def _errors_from_markers(search_output: str) -> list[dict[str, str]]:
-    """Získa chyby zo stavových markerov vyhľadávania publikácií."""
+    """Read the errors out of the publication search status markers."""
     errors = []
     for error_type, message in re.findall(r"^ERROR:\s*([^-]+?)\s*-\s*(.*?)$", search_output or "", flags=re.I | re.M):
         errors.append({"type": error_type.strip(), "message": message.strip()})
@@ -199,7 +199,7 @@ def _errors_from_markers(search_output: str) -> list[dict[str, str]]:
 
 
 def _publication_relevance(query: str, title: str, summary: str) -> str:
-    """Určí základnú relevanciu publikácie voči dotazu."""
+    """Determine a publication's baseline relevance to the query."""
     query_terms = discriminative_tokens(query)
     if not query_terms:
         return "adjacent"
@@ -218,7 +218,7 @@ def _publication_relevance(query: str, title: str, summary: str) -> str:
 
 
 def _publication_search_query(query: str, english_query: str) -> str:
-    """Pripraví kratší publikačný vyhľadávací dotaz."""
+    """Build a shorter publication search query."""
     base = (english_query or "").strip() or query
     raw_terms = re.findall(r"[a-z0-9][a-z0-9-]{2,}", base.lower())
     compact: list[str] = []
@@ -243,7 +243,7 @@ async def publication_evidence_pack(
     english_query: str = "",
     atomic_requirements: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Vyhľadá a spracuje publikačné dôkazy pre zadaný dotaz."""
+    """Search for and process publication evidence for the given query."""
     warnings: list[str] = []
     verification_failed = False
     query = clean_tool_query(query)
@@ -305,9 +305,9 @@ async def publication_evidence_pack(
             else:
                 fetch_outputs.append(str(item))
 
-    # Plné texty voľne dostupných PDF (arXiv, priame .pdf odkazy, alebo open-access
-    # PDF nájdené cez Unpaywall podľa DOI) pre presnejšie pokrytie prvkov dotazu
-    # obsahom celého článku, nie iba abstraktom.
+    # Full texts of freely available PDFs (arXiv, direct .pdf links, or open-access
+    # PDFs found through Unpaywall by DOI), so requirement coverage is measured
+    # against the whole article rather than the abstract alone.
     fulltext_by_index: dict[int, str] = {}
     if atomic_requirements:
         resolved_urls = await asyncio.gather(
