@@ -1,4 +1,4 @@
-"""Spájanie patentových, publikačných a webových dôkazov do jedného wrapperu."""
+"""Merging patent, publication and web evidence into a single wrapper."""
 
 from __future__ import annotations
 
@@ -30,12 +30,12 @@ TEXT_TAIL_MARKERS = (
 
 
 def _as_array(value: Any) -> list[Any]:
-    """Vráti hodnotu ako zoznam alebo prázdny zoznam."""
+    """Return the value as a list, or an empty list."""
     return value if isinstance(value, list) else []
 
 
 def _safe_parse(value: Any) -> Any:
-    """Bezpečne načíta JSON text alebo vráti surový obsah."""
+    """Safely parse JSON text, or return the raw content."""
     if value is None:
         return None
     if isinstance(value, (dict, list)):
@@ -59,7 +59,7 @@ def _safe_parse(value: Any) -> Any:
 
 
 def _repair_json_payload_text(text: str) -> str:
-    """Opraví bežné chyby v JSON texte bez dopĺňania nových údajov."""
+    """Repair common defects in JSON text without inventing new data."""
     repaired = text.strip()
     repaired = re.sub(r'",\\n(\s*")', r'",\n\1', repaired)
     repaired = re.sub(r"\\(?![\"\\/bfnrtu])", r"\\\\", repaired)
@@ -72,7 +72,7 @@ def _repair_json_payload_text(text: str) -> str:
 
 
 def _decode_string_payload(text: str) -> Any:
-    """Načíta textový vstup, ktorý môže obsahovať vnorené štruktúrované dáta."""
+    """Parse a text input that may contain nested structured data."""
     current: Any = text
     for _ in range(3):
         if not isinstance(current, str):
@@ -96,7 +96,7 @@ def _decode_string_payload(text: str) -> Any:
 
 
 def _unwrap_payload(value: Any, depth: int = 0) -> Any:
-    """Rozbalí bežné Flowise alebo MCP wrappery a vráti ich vnútorný obsah."""
+    """Unwrap the common Flowise or MCP wrappers and return their inner content."""
     if depth > 8:
         return value
 
@@ -144,7 +144,7 @@ def _unwrap_payload(value: Any, depth: int = 0) -> Any:
 
 
 def _text_of(value: Any) -> str:
-    """Prevedie vstupnú hodnotu na text vhodný na ďalšie spracovanie."""
+    """Convert an input value into text suitable for further processing."""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -155,7 +155,7 @@ def _text_of(value: Any) -> str:
 
 
 def _find_balanced_json(text: str, start_index: int) -> str | None:
-    """Nájde v texte celý JSON objekt začínajúci na zadanom indexe."""
+    """Find the complete JSON object in a text starting at a given index."""
     first_brace = text.find("{", max(0, start_index))
     if first_brace < 0:
         return None
@@ -187,7 +187,7 @@ def _find_balanced_json(text: str, start_index: int) -> str | None:
 
 
 def _parse_json_after_label(bundle: str, labels: list[str]) -> Any:
-    """Nájde a načíta JSON objekt, ktorý nasleduje za niektorým zo štítkov."""
+    """Find and parse the JSON object following any one of the labels."""
     lower = bundle.lower()
     for label in labels:
         index = lower.find(label.lower())
@@ -201,7 +201,7 @@ def _parse_json_after_label(bundle: str, labels: list[str]) -> Any:
 
 
 def _parse_all_json_objects(bundle: str) -> list[Any]:
-    """Načíta všetky samostatné JSON objekty nájdené v texte."""
+    """Parse every standalone JSON object found in a text."""
     objects: list[Any] = []
     cursor = 0
     while cursor < len(bundle):
@@ -216,7 +216,7 @@ def _parse_all_json_objects(bundle: str) -> list[Any]:
 
 
 def _find_by_source_type(objects: list[Any], source_type: str) -> Any:
-    """Nájde medzi kandidátmi objekt so zadaným typom zdroja."""
+    """Find the candidate object with the given source type."""
     for item in objects:
         unwrapped = _unwrap_payload(item)
         if isinstance(unwrapped, dict) and unwrapped.get("source_type") == source_type:
@@ -225,7 +225,7 @@ def _find_by_source_type(objects: list[Any], source_type: str) -> Any:
 
 
 def _raw_mapping_value(mapping: dict[str, Any], *keys: str) -> Any:
-    """Vyberie hodnotu zo slovníka bez ohľadu na veľkosť písmen v kľúči."""
+    """Look up a dict value regardless of the key's letter case."""
     lower_map = {str(key).lower(): value for key, value in mapping.items()}
     for key in keys:
         value = lower_map.get(key.lower())
@@ -235,13 +235,13 @@ def _raw_mapping_value(mapping: dict[str, Any], *keys: str) -> Any:
 
 
 def _mapping_value(mapping: dict[str, Any], *keys: str) -> Any:
-    """Vyberie hodnotu zo slovníka a rozbalí prípadný wrapper."""
+    """Look up a dict value and unwrap any wrapper around it."""
     value = _raw_mapping_value(mapping, *keys)
     return _unwrap_payload(value) if value is not None else None
 
 
 def _extract_embedded_source(value: Any, source_type: str) -> Any:
-    """Pokúsi sa nájsť vnorený zdroj podľa typu v textovom alebo štruktúrovanom vstupe."""
+    """Try to locate an embedded source by type in text or structured input."""
     text = _text_of(value)
     if not text:
         return None
@@ -271,13 +271,13 @@ def _extract_embedded_source(value: Any, source_type: str) -> Any:
 
 
 def _mapping_text(mapping: dict[str, Any], *keys: str) -> str:
-    """Vyberie hodnotu zo slovníka a prevedie ju na text."""
+    """Look up a dict value and convert it to text."""
     value = _mapping_value(mapping, *keys)
     return _text_of(value).strip()
 
 
 def _missing_source(source_type: str) -> dict[str, Any]:
-    """Vytvorí normalizovaný blok pre chýbajúci zdroj."""
+    """Build a normalised block for a missing source."""
     return {
         "source_type": source_type,
         "status": "failed",
@@ -290,7 +290,7 @@ def _missing_source(source_type: str) -> dict[str, Any]:
 
 
 def _clean_text_field(value: Any) -> str:
-    """Očistí textové pole od zvyškov vloženého JSON obsahu."""
+    """Clean a text field of leftover embedded JSON content."""
     text = str(value or "")
     for marker in TEXT_TAIL_MARKERS:
         index = text.find(marker)
@@ -301,12 +301,12 @@ def _clean_text_field(value: Any) -> str:
 
 
 def _clean_url_field(value: Any) -> str:
-    """Očistí URL pole a odstráni z neho medzery."""
+    """Clean a URL field and strip whitespace from it."""
     return re.sub(r"\s+", "", _clean_text_field(value))
 
 
 def _repair_hit(hit: Any) -> dict[str, Any] | None:
-    """Znormalizuje jeden nález zo zdrojových dát."""
+    """Normalise a single hit from the source data."""
     if not isinstance(hit, dict):
         return None
 
@@ -321,13 +321,13 @@ def _repair_hit(hit: Any) -> dict[str, Any] | None:
 
 
 def re_search_verified_true(text: str) -> bool:
-    """Zistí, či zvyšný text obsahuje príznak verified_url=true."""
+    """Determine whether the remaining text carries a verified_url=true marker."""
     compact = (text or "").replace("\\n", "\n").replace('\\"', '"').replace(" ", "").lower()
     return '"verified_url":true' in compact or "'verified_url':true" in compact
 
 
 def _repair_hits(hits: Any) -> list[dict[str, Any]]:
-    """Znormalizuje a odfiltruje zoznam nálezov zo zdrojových dát."""
+    """Normalise and filter the list of hits from the source data."""
     repaired: list[dict[str, Any]] = []
     for hit in _as_array(hits):
         repaired_hit = _repair_hit(hit)
@@ -337,7 +337,7 @@ def _repair_hits(hits: Any) -> list[dict[str, Any]]:
 
 
 def _normalize_source(value: Any, source_type: str) -> dict[str, Any]:
-    """Prevedie dáta jedného zdroja do spoločnej štruktúry."""
+    """Convert one source's data into the shared structure."""
     if not isinstance(value, dict):
         return _missing_source(source_type)
 
@@ -353,12 +353,12 @@ def _normalize_source(value: Any, source_type: str) -> dict[str, Any]:
 
 
 def _is_source_type(value: Any, source_type: str) -> bool:
-    """Zistí, či dáta patria požadovanému typu zdroja."""
+    """Determine whether the data belongs to the requested source type."""
     return isinstance(value, dict) and value.get("source_type") == source_type
 
 
 def _overall_status(parts: list[dict[str, Any]]) -> str:
-    """Určí výsledný stav zlúčeného wrapperu podľa dostupnosti zdrojov."""
+    """Determine the overall status of the merged wrapper from source availability."""
     statuses = [part["status"] for part in parts]
     if all(status == "failed" for status in statuses):
         return "failed"
@@ -368,7 +368,7 @@ def _overall_status(parts: list[dict[str, Any]]) -> str:
 
 
 def _can_claim_no(part: dict[str, Any]) -> bool:
-    """Zistí, či zdroj spoľahlivo tvrdí, že nenašiel relevantné výsledky."""
+    """Determine whether a source reliably claims it found no relevant results."""
     return (
         part["status"] == "ok"
         and part["completed"] is True
@@ -378,7 +378,7 @@ def _can_claim_no(part: dict[str, Any]) -> bool:
 
 
 def _query_after_label(bundle: str) -> str:
-    """Vytiahne pôvodný dotaz zo staršieho textového wrapper formátu."""
+    """Extract the original query from the older text wrapper format."""
     lower = bundle.lower()
     label = "original_query:"
     index = lower.find(label)
@@ -401,7 +401,7 @@ def _query_after_label(bundle: str) -> str:
 
 
 def _source_arg(value: Any, source_type: str) -> Any:
-    """Pripraví vstup jedného zdroja z priameho argumentu alebo vnoreného wrapperu."""
+    """Prepare one source's input from a direct argument or a nested wrapper."""
     parsed = _safe_parse(value) if isinstance(value, str) else value
     unwrapped = _unwrap_payload(parsed)
     if _is_source_type(unwrapped, source_type):
@@ -410,7 +410,7 @@ def _source_arg(value: Any, source_type: str) -> Any:
 
 
 def _looks_like_legacy_bundle(value: Any) -> bool:
-    """Zistí, či vstup vyzerá ako starší spoločný textový wrapper."""
+    """Determine whether an input looks like the older combined text wrapper."""
     if isinstance(value, dict):
         keys = {str(key).lower() for key in value}
         return bool({"patent_evidence_json", "publication_evidence_json", "web_evidence_json", "original_query"} & keys)
@@ -432,7 +432,7 @@ def merge_evidence_pack(
     original_query: str = "",
     evidence_bundle: Any = None,
 ) -> str:
-    """Spojí patentové, publikačné a webové dôkazy do jednej JSON štruktúry."""
+    """Merge patent, publication and web evidence into a single JSON structure."""
     shape_warnings: list[str] = []
     if (
         evidence_bundle is None

@@ -1,4 +1,4 @@
-"""Tvorba používateľského výstupu z uloženého prieskumu."""
+"""Building the user-facing output from a stored research session."""
 
 from __future__ import annotations
 
@@ -51,22 +51,22 @@ _ADJACENT_RELEVANCE = {"adjacent", "generic", "loose"}
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
-    """Vráti vstupný slovník alebo prázdny slovník pri inom type hodnoty."""
+    """Return the input dict, or an empty dict for any other type."""
     return value if isinstance(value, dict) else {}
 
 
 def _as_list(value: Any) -> list[Any]:
-    """Vráti vstupný zoznam alebo prázdny zoznam pri inom type hodnoty."""
+    """Return the input list, or an empty list for any other type."""
     return value if isinstance(value, list) else []
 
 
 def _word_count(text: str) -> int:
-    """Spočíta slová v texte."""
+    """Count the words in a text."""
     return len(re.findall(r"\S+", text or ""))
 
 
 def _trim_to_words(text: str, limit: int = TOTAL_WORD_LIMIT) -> str:
-    """Skráti text na maximálny počet slov bez zmeny štruktúry riadkov."""
+    """Truncate a text to a maximum word count without altering its line structure."""
     if _word_count(text) <= limit:
         return text.rstrip()
     out_lines: list[str] = []
@@ -88,7 +88,7 @@ def _trim_to_words(text: str, limit: int = TOTAL_WORD_LIMIT) -> str:
 
 
 def _detect_language(query: str, query_envelope: dict[str, Any] | None = None) -> str:
-    """Určí jazyk výstupu podľa wrapperu dotazu alebo znakov v otázke."""
+    """Determine the output language from the query wrapper or the characters in the question."""
     envelope_language = str((query_envelope or {}).get("language") or "").lower()
     if envelope_language in {"sk", "non_english"}:
         return "sk"
@@ -100,7 +100,7 @@ def _detect_language(query: str, query_envelope: dict[str, Any] | None = None) -
 
 
 def _source_counts(pack: dict[str, Any]) -> dict[str, int]:
-    """Spočíta počet nálezov pre patentové, publikačné a webové zdroje."""
+    """Count the hits for the patent, publication and web sources."""
     return {
         "patent": len(_as_list(_as_dict(pack.get("patents")).get("hits"))),
         "publication": len(_as_list(_as_dict(pack.get("publications")).get("hits"))),
@@ -109,7 +109,7 @@ def _source_counts(pack: dict[str, Any]) -> dict[str, int]:
 
 
 def _source_grades(pack: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Vyhodnotí kvalitu jednotlivých zdrojov v zlúčenom wrapperi."""
+    """Assess the quality of each source in the merged wrapper."""
     return {
         "patent": grade_source(_as_dict(pack.get("patents")), "patent"),
         "publication": grade_source(_as_dict(pack.get("publications")), "publication"),
@@ -118,7 +118,7 @@ def _source_grades(pack: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _sanitize_text(text: Any, limit: int) -> str:
-    """Očistí textové pole a skráti ho na daný počet znakov."""
+    """Clean a text field and truncate it to a given character count."""
     raw = str(text or "").replace("\r", " ")
     raw = _SUMMARY_PREFIX_RE.sub("", raw)
     cutoff = _CONTENT_CUTOFF_RE.search(raw)
@@ -145,7 +145,7 @@ def _sanitize_text(text: Any, limit: int) -> str:
 
 
 def _is_mostly_non_ascii(text: str, threshold: float = NON_ASCII_DROP_THRESHOLD) -> bool:
-    """Zistí, či text obsahuje príliš veľa znakov mimo ASCII."""
+    """Determine whether a text contains too many non-ASCII characters."""
     if not text:
         return False
     non_ascii = sum(1 for char in text if ord(char) > 127)
@@ -153,12 +153,12 @@ def _is_mostly_non_ascii(text: str, threshold: float = NON_ASCII_DROP_THRESHOLD)
 
 
 def _sanitize_display_text(text: Any, limit: int) -> str:
-    """Očistí text určený na zobrazenie od entít a zdvojených výrazov."""
+    """Clean display text of HTML entities and duplicated phrases."""
     return _sanitize_text(collapse_repeats(unescape_entities(text)), limit)
 
 
 def _sanitize_summary(text: Any, limit: int, language: str, title: Any = "") -> str:
-    """Očistí zhrnutie nálezu pred vložením do odpovede pre používateľa."""
+    """Clean a hit's summary before inserting it into the user-facing answer."""
     raw_initial = str(text or "")
     if _TABLE_PIPE_RE.search(raw_initial):
         return ""
@@ -171,7 +171,7 @@ def _sanitize_summary(text: Any, limit: int, language: str, title: Any = "") -> 
 
 
 def _conclusion_phrase(verdict: str, language: str) -> str:
-    """Vráti krátke slovné zhrnutie verdiktu v zvolenom jazyku."""
+    """Return a short verbal summary of the verdict in the selected language."""
     if language == "sk":
         if verdict in {"exact_match", "close_prior_art"}:
             return "Vrátené agregované dôkazy naznačujú relevantný alebo blízky prior art."
@@ -190,7 +190,7 @@ def _conclusion_phrase(verdict: str, language: str) -> str:
 
 
 def _uncertainty_text(verdict: str, retrieval: str, language: str) -> str:
-    """Vráti text upozornenia na neistotu podľa verdiktu a stavu získavania dát."""
+    """Return the uncertainty caveat text for the verdict and retrieval state."""
     if language == "sk":
         if verdict == "no_reliable_prior_art":
             return "Toto neznamená, že prior art neexistuje mimo spoľahlivo dokončeného vyhľadávania."
@@ -205,7 +205,7 @@ def _uncertainty_text(verdict: str, retrieval: str, language: str) -> str:
 
 
 def _section_labels(language: str) -> dict[str, str]:
-    """Vráti popisy sekcií používateľskej odpovede v zvolenom jazyku."""
+    """Return the section labels of the user answer in the selected language."""
     if language == "sk":
         return {
             "summary": "## Zhrnutie",
@@ -326,7 +326,7 @@ def _section_labels(language: str) -> dict[str, str]:
 
 
 def _novelty_score(verdict: str, confidence: str, retrieval: str) -> tuple[int | None, str]:
-    """Prevedie verdikt na odhadované číselné skóre novosti."""
+    """Convert a verdict into an approximate numeric novelty score."""
     if verdict == "partial_retrieval" or retrieval == "partial":
         return None, "partial"
     base = {
@@ -343,11 +343,11 @@ def _novelty_score(verdict: str, confidence: str, retrieval: str) -> tuple[int |
 
 
 def _summary_carries_evidence(summary: str, query_tokens: set[str] | None) -> bool:
-    """Overí, či súhrn nesie aspoň nejaký obsah súvisiaci s dotazom.
+    """Check whether a summary carries any content related to the query at all.
 
-    Po očistení navigačného balastu môže zo stránky zostať text, ktorý síce
-    vyzerá čitateľne, ale s dotazom nemá nič spoločné. Taký súhrn je v reporte
-    horší než žiadny — pri náleze sa potom zobrazia iba overiteľné údaje.
+    Once navigational clutter is stripped, what remains of a page can read
+    fluently while having nothing to do with the query. Such a summary is worse
+    than none in the report, so the hit is then shown with verifiable fields only.
     """
     if not query_tokens:
         return True
@@ -361,7 +361,7 @@ def _render_hit_block(
     language: str,
     query_tokens: set[str] | None = None,
 ) -> list[str]:
-    """Pripraví jeden nález ako krátky blok do výslednej odpovede."""
+    """Render a single hit as a short block in the final answer."""
     title = _sanitize_display_text(hit.get("title"), TITLE_CHAR_LIMIT) or f"Hit {index}"
     url = _sanitize_text(hit.get("url"), URL_CHAR_LIMIT)
     patent_number = _sanitize_text(hit.get("patent_number"), 60)
@@ -406,7 +406,7 @@ def _render_hit_block(
 
 
 def _hit_is_direct(hit: dict[str, Any]) -> bool:
-    """Zistí, či nález predstavuje priamy alebo silný dôkaz."""
+    """Determine whether a hit constitutes direct or strong evidence."""
     relevance = str(hit.get("relevance") or "").strip().lower()
     if relevance in {"adjacent", "generic", "loose"}:
         return False
@@ -421,13 +421,13 @@ _FAILED_HIT_EVIDENCE_LEVELS = frozenset({
 
 
 def _is_failed_hit(hit: dict[str, Any]) -> bool:
-    """Zistí, či nález vznikol zo zlyhaného alebo neovereného získania dát."""
+    """Determine whether a hit came from a failed or unverified retrieval."""
     level = str(hit.get("evidence_level") or "").strip().lower()
     return level in _FAILED_HIT_EVIDENCE_LEVELS
 
 
 def _is_report_visible_hit(source_type: str, hit: dict[str, Any]) -> bool:
-    """Rozhodne, či sa nález má zobraziť v používateľskej odpovedi."""
+    """Decide whether a hit should appear in the user-facing answer."""
     if _is_failed_hit(hit):
         return False
     relevance = str(hit.get("relevance") or "").strip().lower()
@@ -439,7 +439,7 @@ def _is_report_visible_hit(source_type: str, hit: dict[str, Any]) -> bool:
 def _select_rendered_hits(
     source: dict[str, Any], hits: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Vyberie nálezy vhodné na zobrazenie vo výslednej odpovedi."""
+    """Select the hits suitable for display in the final answer."""
     source_type = str(source.get("source_type") or "").strip().lower()
     return [hit for hit in hits if _is_report_visible_hit(source_type, hit)]
 
@@ -452,7 +452,7 @@ def _render_source_subsection(
     language: str,
     query_tokens: set[str] | None = None,
 ) -> list[str]:
-    """Pripraví sekciu jedného typu zdroja s priamymi a slabšími nálezmi."""
+    """Render the section for one source type, with its direct and weaker hits."""
     lines = [header]
     completed = source.get("completed") is True
     reliable_no = source.get("reliable_no_results") is True
@@ -487,7 +487,7 @@ def _render_source_subsection(
 
 
 def _humanize_retrieval(retrieval: str, labels: dict[str, str]) -> str:
-    """Prevedie interný stav získavania dát na text pre používateľa."""
+    """Convert the internal retrieval state into user-facing text."""
     mapping = {
         "complete": labels["retrieval_complete"],
         "partial": labels["retrieval_partial"],
@@ -510,7 +510,7 @@ def _render_summary_section(
     exact_combination_found: bool = False,
     corroborated_documents: list[str] | None = None,
 ) -> list[str]:
-    """Vytvorí úvodné zhrnutie výsledku prieskumu."""
+    """Build the opening summary of the research result."""
     grade_text = ", ".join(
         f"{source}: {data.get('quality_grade', 'missing')}" for source, data in source_grades.items()
     )
@@ -546,7 +546,7 @@ def _render_novelty_section(
     labels: dict[str, str],
     exact_combination_found: bool = False,
 ) -> list[str]:
-    """Vytvorí sekciu s hodnotením novosti a dôvery."""
+    """Build the section assessing novelty and confidence."""
     if verdict == "exact_match" and exact_combination_found:
         score, _status = _novelty_score(verdict, confidence, retrieval)
         if score is not None:
@@ -570,7 +570,7 @@ def _qualitative_novelty_label(
     retrieval: str,
     language: str,
 ) -> str:
-    """Vráti slovný popis orientačného skóre novosti."""
+    """Return a verbal description of the approximate novelty score."""
     if retrieval in {"partial", "degraded", "mixed_partial", "failed"}:
         return "low confidence - partial retrieval" if language != "sk" else "nízka istota - neúplné vyhľadávanie"
     mapping_en = {
@@ -597,7 +597,7 @@ def _render_flaws_section(
     has_any_hits: bool,
     labels: dict[str, str],
 ) -> list[str]:
-    """Vytvorí sekciu s nedostatkami existujúcich riešení."""
+    """Build the section on the shortcomings of existing solutions."""
     if retrieval == "partial":
         body = labels["flaws_partial"]
     elif not has_any_hits:
@@ -612,7 +612,7 @@ def _render_innovation_section(
     has_any_hits: bool,
     labels: dict[str, str],
 ) -> list[str]:
-    """Vytvorí sekciu s priestorom pre inováciu."""
+    """Build the section on the room available for innovation."""
     if not has_any_hits:
         body = labels["innov_no_data"]
     elif verdict in {"exact_match", "close_prior_art"}:
@@ -630,7 +630,7 @@ def _render_sources_section(
     all_hits: list[dict[str, Any]],
     labels: dict[str, str],
 ) -> list[str]:
-    """Vytvorí zoznam unikátnych zdrojových URL adries."""
+    """Build the list of unique source URLs."""
     seen: set[str] = set()
     lines: list[str] = [labels["sources"]]
     counter = 0
@@ -654,7 +654,7 @@ def _render_uncertainty_section(
     per_requirement_status: list[dict[str, Any]] | None = None,
     language: str = "en",
 ) -> list[str]:
-    """Vytvorí sekciu s limitmi, neistotou a pokrytím požiadaviek."""
+    """Build the section covering limits, uncertainty and requirement coverage."""
     lines = [labels["uncertainty_section"]]
     if retrieval in {"partial", "degraded", "mixed_partial", "failed"}:
         lines.append(f"- {labels['uncertainty_partial']}")
@@ -735,7 +735,7 @@ def _render_user_answer(
     retrieval_status_notes: list[str] | None = None,
     corroborated_documents: list[str] | None = None,
 ) -> str:
-    """Vytvorí kompletnú odpoveď pre používateľa zo zlúčeného wrapperu dôkazov."""
+    """Build the complete user-facing answer from the merged evidence wrapper."""
     labels = _section_labels(language)
     patents = _as_dict(pack.get("patents"))
     publications = _as_dict(pack.get("publications"))
@@ -773,8 +773,9 @@ def _render_user_answer(
         if len(notes_section) > 1:
             sections.append(notes_section)
 
-    # Tokeny dotazu slúžia na vyradenie súhrnov, ktoré po očistení balastu
-    # už s dotazom nesúvisia (typicky zvyšky navigácie webovej stránky).
+    # The query tokens are used to discard summaries that, once the clutter is
+    # stripped, no longer relate to the query at all -- typically leftovers of a
+    # web page's navigation.
     query_tokens = _relevance_tokens(query)
     state_of_art = [labels["state_of_art"]]
     state_of_art.extend(
@@ -835,7 +836,7 @@ _VERIFIED_EVIDENCE_LEVELS = frozenset({
 _FOCUSED_RELEVANCE_LEVELS = frozenset({"focused", "direct", "exact"})
 
 def _is_verified_hit(hit: dict[str, Any]) -> bool:
-    """Zistí, či nález má použiteľnú úroveň dôkazu a nie je len susedný."""
+    """Determine whether a hit has a usable evidence level and is not merely adjacent."""
     level = str(hit.get("evidence_level") or "").strip().lower()
     if level not in _VERIFIED_EVIDENCE_LEVELS:
         return False
@@ -845,7 +846,7 @@ def _is_verified_hit(hit: dict[str, Any]) -> bool:
     return True
 
 def _hit_text_blob(hit: dict[str, Any]) -> str:
-    """Spojí textové polia nálezu do jedného reťazca pre porovnávanie."""
+    """Join a hit's text fields into a single string for matching."""
     parts = [
         str(hit.get("title") or ""),
         str(hit.get("summary") or ""),
@@ -857,7 +858,7 @@ def _requirement_keyword_sets(
     critical_requirements: list[str],
     atomic_requirements: list[dict[str, Any]] | None = None,
 ) -> list[list[str]]:
-    """Pripraví kľúčové slová pre jednotlivé kritické požiadavky."""
+    """Prepare the keywords for each critical requirement."""
     if atomic_requirements:
         sets: list[list[str]] = []
         for atom in atomic_requirements:
@@ -883,7 +884,7 @@ def _requirement_coverage(
     critical_requirements: list[str],
     atomic_requirements: list[dict[str, Any]] | None = None,
 ) -> dict[str, int]:
-    """Spočíta, koľko kritických požiadaviek pokrýva každý typ zdroja."""
+    """Count how many critical requirements each source type covers."""
     if not critical_requirements and not atomic_requirements:
         return {"patent": 0, "publication": 0, "web": 0}
 
@@ -918,7 +919,7 @@ def _single_hit_covers_all_atoms(
     pack: dict[str, Any],
     atomic_requirements: list[dict[str, Any]],
 ) -> bool:
-    """Zistí, či jeden overený nález pokrýva všetky atomické požiadavky."""
+    """Determine whether a single verified hit covers every atomic requirement."""
     if not atomic_requirements:
         return False
     atom_term_sets = [
@@ -946,7 +947,7 @@ def _per_requirement_status(
     pack: dict[str, Any],
     atomic_requirements: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Vytvorí vyhodnotenie pokrytia pre každú atomickú požiadavku."""
+    """Build the coverage assessment for each atomic requirement."""
     if not atomic_requirements:
         return []
     rows: list[dict[str, Any]] = []
@@ -1013,7 +1014,7 @@ _GOOGLE_PATENT_URL_ID_RE = re.compile(r"patents\.google\.com/patent/([a-z0-9]+)"
 
 
 def _hit_doc_ids(hit: dict[str, Any]) -> set[str]:
-    """Vytvorí kanonické identifikátory dokumentu pre porovnanie naprieč zdrojmi."""
+    """Build canonical document identifiers for matching across sources."""
     ids: set[str] = set()
     patent_number = str(hit.get("patent_number") or "").upper().strip()
     if patent_number and patent_number != "UNKNOWN":
@@ -1032,10 +1033,10 @@ def _hit_doc_ids(hit: dict[str, Any]) -> set[str]:
 
 
 def _mark_cross_source_corroboration(pack: dict[str, Any]) -> list[str]:
-    """Nájde dokumenty potvrdené viacerými typmi zdrojov a označí príslušné nálezy.
+    """Find documents confirmed by more than one source type and mark those hits.
 
-    Vracia zoznam čitateľných popisov korohorovaných dokumentov; zároveň
-    priamo v packu nastaví nálezom príznak `cross_source_corroborated`.
+    Returns a list of readable descriptions of the corroborated documents, and
+    sets the `cross_source_corroborated` flag on the hits in the pack itself.
     """
     sources = (("patent", "patents"), ("publication", "publications"), ("web", "web"))
     id_to_sources: dict[str, set[str]] = {}
@@ -1076,7 +1077,7 @@ def _mark_cross_source_corroboration(pack: dict[str, Any]) -> list[str]:
 def _pseudo_atoms_from_requirements(
     critical_requirements: list[str],
 ) -> list[dict[str, Any]]:
-    """Vytvorí zobrazovacie atómy z textových kritických požiadaviek bez atomického rozkladu."""
+    """Build display atoms from textual critical requirements when no atomic decomposition exists."""
     pseudo: list[dict[str, Any]] = []
     for requirement in critical_requirements or []:
         keyword_sets = _requirement_keyword_sets([str(requirement)], None)
@@ -1100,7 +1101,7 @@ def build_user_answer_payload(
     debug_mode: bool = False,
     retrieval_status_notes: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Vytvorí štruktúrovaný výstup s odpoveďou pre používateľa."""
+    """Build the structured payload containing the user-facing answer."""
     pack = _parse_pack(merged_pack)
     query = str(original_query or pack.get("query") or "")
     corroborated_documents = _mark_cross_source_corroboration(pack)
