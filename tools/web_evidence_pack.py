@@ -1,4 +1,4 @@
-"""Spracovanie webových dôkazov pre finálny prieskum."""
+"""Processing of web evidence for the final research report."""
 
 from __future__ import annotations
 
@@ -35,12 +35,12 @@ _PATENT_LIKE_DOMAINS = (
 )
 
 def _is_patent_like_url(url: str) -> bool:
-    """Zistí, či URL adresa vyzerá ako patentový zdroj."""
+    """Determine whether a URL looks like a patent source."""
     lower = (url or "").lower()
     return any(domain in lower for domain in _PATENT_LIKE_DOMAINS)
 
 def _normalize_patent_like_url(url: str, title: str = "", snippet: str = "") -> tuple[str, str]:
-    """Prevedie patentový webový odkaz na jednotnú Google Patents URL, ak sa dá."""
+    """Convert a patent web link into a canonical Google Patents URL where possible."""
     number = extract_patent_number(url, title, snippet)
     if number and number != "Unknown":
         return f"https://patents.google.com/patent/{number}/en", number
@@ -84,7 +84,7 @@ class WebCandidate:
     no_fetch: bool = False  
 
 def _parse_candidates(search_output: str) -> tuple[list[WebCandidate], list[str]]:
-    """Získa webové kandidáty z textového výstupu vyhľadávania."""
+    """Extract the web candidates from the search tool's text output."""
     candidates: list[WebCandidate] = []
     skipped_unsupported: list[str] = []
     seen: set[str] = set()
@@ -127,10 +127,10 @@ _PDF_SKIPPED_OUTPUT = "SKIPPED: non-text evidence format is kept as snippet-back
 
 
 async def _pdf_fetch_output(url: str, timeout_ms: int, query: str) -> str:
-    """Stiahne PDF dokument a vráti výstup v rovnakom formáte ako web_fetch.
+    """Download a PDF document and return output in the same format as web_fetch.
 
-    Ak sa text nepodarí extrahovať, dokument zostáva snippet-backed dôkazom
-    ako v pôvodnom správaní.
+    If the text cannot be extracted, the document remains snippet-backed
+    evidence, as in the original behaviour.
     """
     timeout_s = max(8.0, min((timeout_ms or 14000) / 1000 * 2, 30.0))
     text = await pdf_fetch_text(url, timeout_s=timeout_s)
@@ -155,16 +155,16 @@ async def _pdf_fetch_output(url: str, timeout_ms: int, query: str) -> str:
     return "\n".join(lines)
 
 def _fetch_succeeded(fetch_output: str) -> bool:
-    """Zistí, či načítanie stránky prinieslo overený fulltextový obsah."""
+    """Determine whether fetching the page produced verified full-text content."""
     return "EVIDENCE_LEVEL: FULLTEXT_VERIFIED" in (fetch_output or "") and "TOOL_ERROR:" not in (fetch_output or "")
 
 def _is_unsupported_evidence_url(url: str) -> bool:
-    """Zistí, či URL smeruje na typ súboru, ktorý tento modul nespracúva."""
+    """Determine whether a URL points to a file type this module does not handle."""
     lower = (url or "").lower().split("?", 1)[0]
     return lower.endswith(UNSUPPORTED_EVIDENCE_EXTENSIONS)
 
 def _query_terms(query: str) -> set[str]:
-    """Vytiahne významové slová z dotazu pre lokálne filtrovanie webových nálezov."""
+    """Extract the meaningful words of a query for local filtering of web hits."""
     terms = set()
     for token in re.findall(r"[a-z0-9][a-z0-9-]{3,}", (query or "").lower()):
         if token not in QUERY_STOPWORDS:
@@ -172,12 +172,12 @@ def _query_terms(query: str) -> set[str]:
     return terms
 
 def _query_coverage(query: str, text: str) -> int:
-    """Spočíta, koľko významových slov z dotazu sa nachádza v texte."""
+    """Count how many of the query's meaningful words occur in a text."""
     lower = (text or "").lower()
     return sum(1 for term in _query_terms(query) if term in lower)
 
 def _has_product_anchor(query: str, text: str) -> bool:
-    """Overí, či text obsahuje aspoň jeden hlavný výraz z dotazu."""
+    """Check whether a text contains at least one head term from the query."""
     anchor_terms = subject_anchors(_query_terms(query))
     if not anchor_terms:
         return True
@@ -200,16 +200,16 @@ _CONCRETE_ARTIFACT_PATTERNS = (
 _CONCRETE_ARTIFACT_RE = re.compile("|".join(_CONCRETE_ARTIFACT_PATTERNS), re.IGNORECASE)
 
 def _has_concrete_artifact(text: str) -> bool:
-    """Zistí, či text obsahuje konkrétny identifikátor alebo technickú položku."""
+    """Determine whether a text contains a concrete identifier or technical item."""
     return bool(_CONCRETE_ARTIFACT_RE.search(text or ""))
 
 def _required_direct_coverage(query: str) -> int:
-    """Určí minimálny počet pokrytých slov dotazu pre priamy webový dôkaz."""
+    """Determine the minimum number of covered query words for direct web evidence."""
     terms = _query_terms(query)
     return max(3, min(6, (len(terms) + 1) // 2))
 
 def _relevance_label(query: str, evidence_text: str, score: float, fetch_ok: bool) -> str:
-    """Priradí webovému dôkazu štítok relevancie podľa konkrétnosti a pokrytia požiadaviek."""
+    """Assign a relevance label to web evidence from its concreteness and requirement coverage."""
     terms = _query_terms(query)
     has_artifact = _has_concrete_artifact(evidence_text or "")
     if not terms:
@@ -225,13 +225,13 @@ def _relevance_label(query: str, evidence_text: str, score: float, fetch_ok: boo
     return "adjacent"
 
 def _registrable_domain(url: str) -> str:
-    """Vráti zjednodušenú doménu URL pre zoskupovanie dôkazov z toho istého zdroja."""
+    """Return a simplified URL domain for grouping evidence from the same source."""
     match = re.match(r"https?://([^/]+)", (url or "").lower())
     host = match.group(1) if match else ""
     return host[4:] if host.startswith("www.") else host
 
 def _apply_collective_directness(hits: list[dict], query: str) -> None:
-    """Označí najlepší nález z domény ako priamy dôkaz, keď sa požiadavky potvrdia naprieč jej stránkami."""
+    """Mark a domain's best hit as direct evidence when the requirements are confirmed across its pages."""
     if not hits or any(hit.get("relevance") == "direct" for hit in hits):
         return
     groups: dict[str, list[dict]] = {}
@@ -260,7 +260,7 @@ def _apply_collective_directness(hits: list[dict], query: str) -> None:
         return
 
 def _minimum_hit_coverage(query: str) -> int:
-    """Určí minimálny počet slov z dotazu potrebný na ponechanie webového nálezu."""
+    """Determine the minimum number of query words needed to keep a web hit."""
     terms = _query_terms(query)
     if len(terms) >= 7:
         return 3
@@ -269,7 +269,7 @@ def _minimum_hit_coverage(query: str) -> int:
     return 1 if terms else 0
 
 def _should_keep_hit(query: str, evidence_text: str, title: str = "", url: str = "") -> bool:
-    """Rozhodne, či webový nález obsahuje dosť konkrétnych prvkov dotazu."""
+    """Decide whether a web hit contains enough concrete query elements."""
     terms = _query_terms(query)
     if not terms:
         return bool(evidence_text.strip())
@@ -279,7 +279,7 @@ def _should_keep_hit(query: str, evidence_text: str, title: str = "", url: str =
     return _query_coverage(query, combined) >= _minimum_hit_coverage(query)
 
 def _extract_fetch_excerpt(fetch_output: str) -> str:
-    """Vytiahne krátky úryvok z výstupu webového fetch nástroja."""
+    """Extract a short excerpt from the web fetch tool's output."""
     match = re.search(r"CONTENT:\s*(.*?)\nSTATUS:", fetch_output or "", flags=re.S)
     return trim_words(match.group(1), 80) if match else ""
 
@@ -289,19 +289,19 @@ _COVERAGE_TOKENS_RE = re.compile(r"^COVERAGE_TOKENS:\s*(.*)$", flags=re.M)
 
 
 def _extract_analysis_text(fetch_output: str) -> str:
-    """Vytiahne rozšírený analytický text z výstupu fetch nástroja."""
+    """Extract the extended analysis text from the fetch tool's output."""
     match = _ANALYSIS_RE.search(fetch_output or "")
     return match.group(1).strip() if match else ""
 
 
 def _extract_coverage_tokens(fetch_output: str) -> str:
-    """Vytiahne tokeny celej stránky určené na výpočet pokrytia prvkov."""
+    """Extract the whole-page tokens used to compute requirement coverage."""
     match = _COVERAGE_TOKENS_RE.search(fetch_output or "")
     return match.group(1).strip() if match else ""
 
 
 def _verification_map(verification: str) -> dict[str, bool]:
-    """Prevedie výsledok overenia URL adries na slovník dostupnosti."""
+    """Convert the URL verification result into an availability map."""
     out: dict[str, bool] = {}
     pattern = re.compile(r"Verification status for URL:\s*(https?://\S+)\s+returned\s+(ALIVE|BROKEN)\b", flags=re.I)
     for url, status in pattern.findall(verification or ""):
@@ -310,14 +310,14 @@ def _verification_map(verification: str) -> dict[str, bool]:
 
 
 def _errors_from_markers(search_output: str) -> list[dict[str, str]]:
-    """Získa štruktúrované chyby zo stavových markerov webového vyhľadávania."""
+    """Read the structured errors out of the web search status markers."""
     errors = []
     for error_type, message in re.findall(r"^ERROR:\s*([^-]+?)\s*-\s*(.*?)$", search_output or "", flags=re.I | re.M):
         errors.append({"type": error_type.strip(), "message": trim_words(message.strip(), 40)})
     return errors
 
 def _status(search_output: str, hits: list[dict], warnings: list[str], errors: list[str]) -> str:
-    """Určí výsledný stav webového evidence packu."""
+    """Determine the final status of the web evidence pack."""
     search_status = parse_status_marker(search_output)
     if search_status == "failed":
         return "failed"
@@ -333,7 +333,7 @@ async def web_evidence_pack(
     english_query: str = "",
     atomic_requirements: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Vyhľadá a spracuje webové dôkazy pre zadaný dotaz."""
+    """Search for and process web evidence for the given query."""
     warnings: list[str] = []
     errors: list[str] = []
     hits: list[dict] = []

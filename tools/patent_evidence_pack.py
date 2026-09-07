@@ -1,4 +1,4 @@
-"""Spracovanie patentových dôkazov pre finálny prieskum."""
+"""Processing of patent evidence for the final research report."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ _EXACT_CANDIDATE_EVIDENCE_LEVELS = frozenset({"claim_verified", "abstract_verifi
 def _compute_claim_coverage(
     claim_text: str, atomic_requirements: list[dict[str, Any]] | None
 ) -> tuple[float, int]:
-    """Vypočíta, koľko častí dotazu je pokrytých textom patentových nárokov."""
+    """Compute how many parts of the query are covered by the patent claim text."""
     return atom_coverage(claim_text or "", atomic_requirements)
 
 
@@ -38,7 +38,7 @@ _COMBINATION_PATTERNS = (
 
 
 def _query_is_combination_pattern(query: str) -> bool:
-    """Zistí, či dotaz opisuje kombináciu viacerých prvkov v jednom riešení."""
+    """Determine whether the query describes a combination of several elements in one solution."""
     text = query or ""
     return any(pattern.search(text) for pattern in _COMBINATION_PATTERNS)
 
@@ -50,7 +50,7 @@ def _patent_relevance(
     claim_coverage: float = 0.0,
     evidence_level: str = "",
 ) -> str:
-    """Určí orientačnú relevanciu patentového nálezu voči dotazu."""
+    """Determine the approximate relevance of a patent hit to the query."""
     query_terms = discriminative_tokens(query)
     if not query_terms:
         if claim_coverage >= _CLAIM_COVERAGE_FOCUSED_THRESHOLD:
@@ -100,7 +100,7 @@ _GOOGLE_PATENTS_SUFFIX_RE = re.compile(
 
 
 def _patent_id_from_url(url: str) -> str:
-    """Vytiahne patentové číslo z URL adresy, ak sa v nej nachádza."""
+    """Extract the patent number from a URL, if one is present."""
     match = _URL_PATENT_ID_RE.search(url or "")
     return match.group(1).upper() if match else ""
 
@@ -108,7 +108,7 @@ def _patent_id_from_url(url: str) -> str:
 def _normalize_patent_identity(
     raw_title: str, raw_patent_number: str, url: str
 ) -> tuple[str, str]:
-    """Zjednotí názov patentu a patentové číslo podľa URL adresy."""
+    """Reconcile the patent title and number against the URL."""
     title = (raw_title or "").strip()
     patent_number = (raw_patent_number or "").strip().upper()
     url_id = _patent_id_from_url(url)
@@ -126,7 +126,7 @@ def _normalize_patent_identity(
 
 
 def _verification_map(verification: str) -> dict[str, bool]:
-    """Prevedie výsledok overenia URL adries na slovník dostupnosti."""
+    """Convert the URL verification result into an availability map."""
     out: dict[str, bool] = {}
     for url, status in VERIFY_RE.findall(verification or ""):
         out[url.rstrip(".,;")] = status.upper() == "ALIVE"
@@ -134,13 +134,13 @@ def _verification_map(verification: str) -> dict[str, bool]:
 
 
 def _field(text: str, label: str) -> str:
-    """Získa hodnotu konkrétneho poľa z textového výstupu fetch nástroja."""
+    """Read the value of a specific field from a fetch tool's text output."""
     match = re.search(rf"^{re.escape(label)}:\s*(.*?)$", text or "", flags=re.I | re.M)
     return match.group(1).strip() if match else ""
 
 
 def _fetch_level(fetch_output: str) -> str:
-    """Prevedie hodnotu EVIDENCE_LEVEL z patent_fetch na jednotnú úroveň dôkazu."""
+    """Map the EVIDENCE_LEVEL value from patent_fetch onto the shared evidence level."""
     raw = _field(fetch_output, "EVIDENCE_LEVEL").upper()
     return {
         "CLAIM_VERIFIED": "claim_verified",
@@ -152,7 +152,7 @@ def _fetch_level(fetch_output: str) -> str:
 
 
 def _fetch_summary(fetch_output: str) -> str:
-    """Vytvorí krátke zhrnutie z výsledku patent_fetch."""
+    """Build a short summary from a patent_fetch result."""
     claim = _field(fetch_output, "CLAIM1")
     abstract = _field(fetch_output, "ABSTRACT")
     parts = []
@@ -164,7 +164,7 @@ def _fetch_summary(fetch_output: str) -> str:
 
 
 def _fetch_attempt_log(fetch_output: str) -> list[dict[str, object]]:
-    """Načíta diagnostický záznam pokusov z výsledku patent_fetch."""
+    """Read the diagnostic attempt log out of a patent_fetch result."""
     raw = _field(fetch_output, "ATTEMPT_LOG_JSON")
     if not raw:
         return []
@@ -176,7 +176,7 @@ def _fetch_attempt_log(fetch_output: str) -> list[dict[str, object]]:
 
 
 def _clean_hit_text(value: Any) -> str:
-    """Očistí textové pole nálezu od zvyškov vloženého JSON obsahu."""
+    """Clean a hit's text field of leftover embedded JSON content."""
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     for marker in (
         '\\"verified_url\\":',
@@ -205,7 +205,7 @@ _MIN_SNIPPET_WORDS = 8
 
 
 def _has_usable_snippet(item: dict[str, Any]) -> bool:
-    """Zistí, či kandidát nesie vlastný vyhľadávací úryvok použiteľný ako dôkaz."""
+    """Determine whether a candidate carries its own search snippet usable as evidence."""
     snippet = _clean_hit_text(item.get("snippet") or "")
     if "No abstract snippet" in snippet:
         return False
@@ -213,7 +213,7 @@ def _has_usable_snippet(item: dict[str, Any]) -> bool:
 
 
 def _worse_status(base_status: str, warnings: list[str], verification_failed: bool) -> str:
-    """Zhorší stav evidence packu, ak nastali varovania alebo zlyhalo overenie."""
+    """Downgrade the evidence pack status if warnings occurred or verification failed."""
     if base_status == "failed":
         return "failed"
     if base_status == "partial_failure" or warnings or verification_failed:
@@ -222,7 +222,7 @@ def _worse_status(base_status: str, warnings: list[str], verification_failed: bo
 
 
 def _completed(search_completed: bool, status: str) -> bool:
-    """Určí, či možno evidence pack považovať za dokončený."""
+    """Determine whether the evidence pack can be considered complete."""
     return bool(search_completed and status == "ok")
 
 
@@ -234,7 +234,7 @@ async def patent_evidence_pack(
     atomic_requirements: list[dict[str, Any]] | None = None,
     english_query: str = "",
 ) -> str:
-    """Vyhľadá a spracuje patentové dôkazy pre zadaný dotaz."""
+    """Search for and process patent evidence for the given query."""
     warnings: list[str] = []
     verification_failed = False
     query = clean_tool_query(query)
@@ -269,7 +269,7 @@ async def patent_evidence_pack(
         outer_ceiling_s = max(6.0, (per_fetch_ceiling * 2) / 1000.0)
 
         async def _bounded_patent_fetch(url: str, pdf_url: str) -> str:
-            """Načíta detail patentu s dodatočným časovým limitom volania."""
+            """Fetch a patent's detail with an additional call timeout."""
             try:
                 return await asyncio.wait_for(
                     patent_fetch(url=url, timeout_ms=per_fetch_ceiling, pdf_url=pdf_url),
@@ -333,10 +333,10 @@ async def patent_evidence_pack(
         elif fetch_output and evidence_level in {"fetch_timeout", "fetch_failed"}:
             warnings.append(f"Patent fetch did not verify {item.get('url')}: {trim_words(fetch_output, 40)}")
         if evidence_level in {"fetch_timeout", "fetch_failed"} and _has_usable_snippet(item):
-            # Neúspešné overenie nesmie zmazať dôkaz, ktorý už máme. Bez tohto
-            # kroku sa kandidát prepol na zlyhanú úroveň a vykresľovanie ho
-            # skrylo — patent, ktorý sa systém pokúsil overiť, tak z reportu
-            # zmizol, zatiaľ čo neoverovaný kandidát v ňom zostal.
+            # A failed verification must not erase evidence already in hand.
+            # Without this step the candidate dropped to a failed level and
+            # rendering hid it, so a patent the system had tried to verify
+            # disappeared from the report while an unverified one stayed in.
             evidence_level = "search_snippet_only"
         url = _clean_hit_text(item.get("url") or "")
         provider = _clean_hit_text(_field(fetch_output, "PROVIDER") or item.get("provider") or search_payload.get("provider") or "")
@@ -351,7 +351,7 @@ async def patent_evidence_pack(
         claims_text = _field(fetch_output, "CLAIMS_TEXT") if fetch_output else ""
         abstract_text = _field(fetch_output, "ABSTRACT") if fetch_output else ""
         description_text = _field(fetch_output, "DESCRIPTION_TEXT") if fetch_output else ""
-        # Tokeny celého oficiálneho PDF (plný text nárokov aj opisu vynálezu).
+        # Tokens of the whole official PDF: the full text of both the claims and the description.
         coverage_tokens = _field(fetch_output, "COVERAGE_TOKENS") if fetch_output else ""
         coverage_parts = [
             part
