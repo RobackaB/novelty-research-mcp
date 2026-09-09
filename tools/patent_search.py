@@ -1,4 +1,4 @@
-"""Vyhľadávanie patentových dokumentov vo viacerých zdrojoch."""
+"""Searching for patent documents across several providers."""
 
 from __future__ import annotations
 
@@ -36,14 +36,14 @@ _PATENT_SEARCH_CACHE: TTLCache[tuple[str, int], str] = TTLCache(
 
 
 class ProviderUnavailable(RuntimeError):
-    """Výnimka pre poskytovateľa, ktorý nie je dostupný alebo nie je nakonfigurovaný."""
+    """Raised when a provider is unavailable or not configured."""
 
 
-# Provideri, ktorých úspešné dokončenie bez nálezov je spoľahlivý negatívny signál.
+# Providers whose successful completion with no hits is a reliable negative signal.
 _PRIMARY_PATENT_PROVIDERS = frozenset({"google_patents_xhr", "tavily", "exa"})
 
-# Google hostuje oficiálne PDF patentov na samostatnom storage buckete, ktorý
-# nepodlieha ochrane proti automatizovaným požiadavkam ako patents.google.com.
+# Google hosts the official patent PDFs on a separate storage bucket, which is
+# not behind the anti-automation protection that guards patents.google.com.
 PATENT_PDF_BASE_URL = "https://patentimages.storage.googleapis.com/"
 
 
@@ -55,9 +55,9 @@ class PatentCandidate:
     snippet: str
     score: float = 0.0
     provider: str = ""
-    # Oficiálne PDF patentu na Google storage; na rozdiel od HTML stránky
-    # nepodlieha ochrane proti automatizovaným požiadavkam a obsahuje plný
-    # text nárokov aj opisu vynálezu.
+    # The official patent PDF on Google storage. Unlike the HTML page it is not
+    # behind anti-automation protection, and it contains the full text of both
+    # the claims and the description.
     pdf_url: str = ""
     assignee: str = ""
     filing_date: str = ""
@@ -65,19 +65,19 @@ class PatentCandidate:
 
 
 def _normalize_query(query: Any) -> str:
-    """Zjednotí vstupný dotaz na jednoduchý text."""
+    """Normalise the input query into plain text."""
     from .query_normalize import coerce_query_input  
     text = coerce_query_input(query) if not isinstance(query, str) else query
     return re.sub(r"\s+", " ", text).strip()
 
 
 def _provider_query(query: str) -> str:
-    """Pripraví dotaz pre poskytovateľov vyhľadávania."""
+    """Prepare the query for the search providers."""
     return _normalize_query(query)
 
 
 def _wipo_query(query: str) -> str:
-    """Pripraví jednoduchší dotaz pre WIPO PATENTSCOPE."""
+    """Prepare a simpler query for WIPO PATENTSCOPE."""
     text = _normalize_query(query).lower()
     stopwords = {
         "the", "and", "for", "with", "that", "this", "from", "into", "using",
@@ -92,7 +92,7 @@ def _wipo_query(query: str) -> str:
 
 
 def _text(value: Any) -> str:
-    """Prevedie hodnotu z API poskytovateľa na čistý jednoriadkový text."""
+    """Convert a value from a provider API into clean single-line text."""
     if isinstance(value, str):
         return re.sub(r"\s+", " ", html.unescape(value)).strip()
     if isinstance(value, list):
@@ -103,7 +103,7 @@ def _text(value: Any) -> str:
 
 
 def _patent_url(number: str, fallback: str = "") -> str:
-    """Vytvorí preferovanú URL adresu patentu alebo použije fallback."""
+    """Build the preferred patent URL, or fall back to the given one."""
     if fallback.startswith("http") and "patents.google.com/patent/" in fallback and number != "Unknown":
         return f"https://patents.google.com/patent/{number}/en"
     if fallback.startswith("http"):
@@ -112,7 +112,7 @@ def _patent_url(number: str, fallback: str = "") -> str:
 
 
 def _normalize_patent_dedupe_key(patent_number: str) -> str:
-    """Zjednotí patentové číslo na kľúč používaný pri odstraňovaní duplicít."""
+    """Normalise a patent number into the key used for deduplication."""
     raw = (patent_number or "").upper().strip()
     if not raw or raw == "UNKNOWN":
         return ""
@@ -120,16 +120,17 @@ def _normalize_patent_dedupe_key(patent_number: str) -> str:
 
 
 def _normalize_title_dedupe_key(title: str) -> str:
-    """Zjednotí názov patentu na kľúč pre rozpoznanie tej istej prihlášky."""
+    """Normalise a patent title into a key that recognises the same application."""
     return re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).strip()
 
 
 def _dedupe(candidates: list[PatentCandidate]) -> list[PatentCandidate]:
-    """Odstráni duplicitné patentové kandidáty podľa čísla, názvu alebo URL adresy.
+    """Remove duplicate patent candidates by number, title or URL.
 
-    Tá istá prihláška sa v jednom výsledku objavuje pod viacerými publikačnými
-    číslami (národné aj medzinárodné podanie, pokračovania). Bez porovnania
-    názvu sa taký vynález dostal do reportu aj štyrikrát a vytláčal iné nálezy.
+    The same application turns up in one result set under several publication
+    numbers (national and international filings, continuations). Without also
+    comparing titles, such an invention reached the report up to four times and
+    crowded out other hits.
     """
     seen: set[str] = set()
     seen_titles: set[str] = set()
@@ -152,7 +153,7 @@ _PHRASE_SCORE_STOP = {"that", "this", "with", "from", "into", "have", "been", "w
 
 
 def _phrase_score(query: str, text: str) -> float:
-    """Zvýši skóre pri zhode s významovými frázami dotazu."""
+    """Raise the score when the candidate matches meaningful phrases of the query."""
     normalized_query = query.lower()
     haystack = text.lower()
     sig_tokens = [
@@ -176,7 +177,7 @@ def _phrase_score(query: str, text: str) -> float:
 
 
 def _score(query: str, candidate: PatentCandidate, idf: dict[str, float] | None = None) -> float:
-    """Vypočíta celkové interné skóre patentového kandidáta."""
+    """Compute the overall internal score of a patent candidate."""
     text = f"{candidate.title} {candidate.snippet}"
     return round(
         min(evidence_score(query, text, "PATENT", idf=idf) + _phrase_score(query, text), 10.0), 2
@@ -184,7 +185,7 @@ def _score(query: str, candidate: PatentCandidate, idf: dict[str, float] | None 
 
 
 def _json_response(result: NormalizedResult, provider: str, candidates: list[PatentCandidate]) -> str:
-    """Zabalí patentových kandidátov do normalizovanej JSON odpovede."""
+    """Wrap patent candidates into the normalised JSON response."""
     payload = {
         "status": result.status,
         "completed": result.completed,
@@ -216,7 +217,7 @@ def _json_response(result: NormalizedResult, provider: str, candidates: list[Pat
 
 
 def _candidate(title: str, url: str, patent_number: str, snippet: str, provider: str) -> PatentCandidate | None:
-    """Vytvorí patentového kandidáta, ak sa dá určiť patentové číslo."""
+    """Build a patent candidate if a patent number can be determined."""
     number = patent_number if patent_number and patent_number != "Unknown" else extract_patent_number(title, snippet, url)
     if number == "Unknown":
         return None
@@ -230,12 +231,12 @@ def _candidate(title: str, url: str, patent_number: str, snippet: str, provider:
 
 
 def _web_patent_query(query: str) -> str:
-    """Doplní do dotazu obmedzenie na patentové weby."""
+    """Add a site restriction for patent websites to the query."""
     return f"{query} site:patents.google.com/patent OR site:patentscope.wipo.int"
 
 
 async def _tavily_patent_search(client: httpx.AsyncClient, query: str, limit: int) -> list[PatentCandidate]:
-    """Vyhľadá patentových kandidátov cez Tavily."""
+    """Search for patent candidates through Tavily."""
     api_key = os.getenv("TAVILY_API_KEY", "").strip()
     if not api_key:
         raise ProviderUnavailable("TAVILY_API_KEY is not configured; skipping Tavily provider.")
@@ -270,7 +271,7 @@ async def _tavily_patent_search(client: httpx.AsyncClient, query: str, limit: in
 
 
 async def _exa_patent_search(client: httpx.AsyncClient, query: str, limit: int) -> list[PatentCandidate]:
-    """Vyhľadá patentových kandidátov cez Exa."""
+    """Search for patent candidates through Exa."""
     api_key = os.getenv("EXA_API_KEY", "").strip()
     if not api_key:
         raise ProviderUnavailable("EXA_API_KEY is not configured; skipping Exa provider.")
@@ -303,10 +304,10 @@ async def _exa_patent_search(client: httpx.AsyncClient, query: str, limit: int) 
 
 
 async def _google_patents_xhr_search(client: httpx.AsyncClient, query: str, limit: int) -> list[PatentCandidate]:
-    """Vyhľadá patentových kandidátov cez natívne Google Patents JSON rozhranie.
+    """Search for patent candidates through the native Google Patents JSON endpoint.
 
-    Rozhranie nevyžaduje API kľúč, takže patentové vyhľadávanie funguje
-    aj bez nakonfigurovaného Tavily alebo Exa.
+    The endpoint needs no API key, so patent search still works when neither
+    Tavily nor Exa is configured.
     """
     response = await client.get(
         "https://patents.google.com/xhr/query",
@@ -349,7 +350,7 @@ async def _google_patents_xhr_search(client: httpx.AsyncClient, query: str, limi
 
 
 def _wipo_publication_number(anchor_text: str, row_text: str, url: str) -> str:
-    """Vytiahne publikačné číslo z riadku výsledku WIPO PATENTSCOPE."""
+    """Extract the publication number from a WIPO PATENTSCOPE result row."""
     normalized_anchor = re.sub(r"[^A-Za-z0-9]", "", anchor_text).upper()
     if re.fullmatch(r"(?:WO|EP|CN|JP|KR)\d{8,}[A-Z0-9]*", normalized_anchor):
         return normalized_anchor
@@ -371,14 +372,14 @@ _WIPO_ROW_PREFIX_RE = re.compile(r"^\s*\d+\.\s*\d{6,}\s*", flags=re.IGNORECASE)
 
 
 def _wipo_snippet(row_text: str) -> str:
-    """Vytvorí snippet z riadku výsledkov WIPO PATENTSCOPE.
+    """Build a snippet from a WIPO PATENTSCOPE result row.
 
-    Riadok tabuľky neobsahuje abstrakt, ale poradové číslo, názov, dátum a
-    najmä celý rozpis medzinárodného patentového triedenia. Ten je zložený zo
-    všeobecných technických slov ("recognising patterns", "computing", "data"),
-    ktoré pri hodnotení relevancie spôsobovali falošné zhody s ľubovoľným
-    technickým dotazom. Klasifikácia a formulárové polia sa preto odstraňujú;
-    ak po očistení nezostane nič vecné, snippet sa nevytvára vôbec.
+    The table row carries no abstract. It carries a sequence number, a title, a
+    date and, above all, the full international patent classification. That
+    classification is made of generic technical words ("recognising patterns",
+    "computing", "data") which caused false relevance matches against almost any
+    technical query. The classification and form fields are therefore stripped,
+    and if nothing substantive survives the cleanup, no snippet is produced.
     """
     text = _WIPO_ROW_PREFIX_RE.sub("", str(row_text or ""))
     text = _WIPO_CLASSIFICATION_RE.sub(" ", text)
@@ -389,7 +390,7 @@ def _wipo_snippet(row_text: str) -> str:
 
 
 def _wipo_title(anchor_text: str, row_text: str) -> str:
-    """Vytiahne názov patentu z riadku výsledku WIPO PATENTSCOPE."""
+    """Extract the patent title from a WIPO PATENTSCOPE result row."""
     text = re.sub(r"^\s*\d+\.\s*", "", row_text)
     text = re.sub(re.escape(anchor_text), "", text, count=1).strip()
     split = re.split(r"\b(?:US|EP|WO|CN|JP|KR)\s*-\s*\d{2}\.\d{2}\.\d{4}", text, maxsplit=1, flags=re.IGNORECASE)
@@ -398,7 +399,7 @@ def _wipo_title(anchor_text: str, row_text: str) -> str:
 
 
 async def _wipo_patentscope_search(client: httpx.AsyncClient, query: str, limit: int) -> list[PatentCandidate]:
-    """Vyhľadá patentových kandidátov vo WIPO PATENTSCOPE."""
+    """Search for patent candidates in WIPO PATENTSCOPE."""
     response = await client.get(
         "https://patentscope.wipo.int/search/en/result.jsf",
         headers={"Referer": "https://patentscope.wipo.int/search/en/search.jsf"},
@@ -425,10 +426,10 @@ async def _wipo_patentscope_search(client: httpx.AsyncClient, query: str, limit:
 
 
 def _shares_discriminative_term(query: str, candidate: PatentCandidate) -> bool:
-    """Overí, či kandidát zdieľa s dotazom aspoň jeden rozlišujúci termín.
+    """Check whether a candidate shares at least one discriminating term with the query.
 
-    Všeobecné technické slová (method, system, device) spájajú takmer ľubovoľné
-    dva patenty, preto sa do úvahy berú len tokeny, ktoré nesú tému dotazu.
+    Generic technical words (method, system, device) connect almost any two
+    patents, so only tokens that carry the subject of the query are considered.
     """
     discriminators = discriminative_tokens(query)
     if not discriminators:
@@ -442,17 +443,18 @@ def _rank(
     limit: int,
     allow_low_confidence: bool = False,
 ) -> tuple[list[PatentCandidate], float]:
-    """Ohodnotí kandidátov a vráti najrelevantnejšie výsledky."""
-    # Vzácnosť termínov sa počíta nad celou množinou kandidátov, aby termíny
-    # spoločné pre všetky patenty nezvyšovali skóre tematicky vzdialených.
+    """Score the candidates and return the most relevant results."""
+    # Term rarity is computed over the whole candidate set, so terms common to
+    # every patent do not inflate the score of topically distant ones.
     corpus_idf = build_corpus_idf([f"{c.title} {c.snippet}" for c in candidates])
     for candidate in candidates:
         candidate.score = _score(query, candidate, idf=corpus_idf)
-    # Doménová kotva sa uplatňuje na všetkých kandidátov, nielen v núdzovom
-    # režime. Publikačná vetva takú podmienku má už dlhšie; patentová nie, takže
-    # patent spojený s dotazom len všeobecnou technickou slovnou zásobou mohol
-    # prejsť aj cez hlavný prah. Váženie vzácnosťou termínov to nezachytí, keď
-    # sú všetci kandidáti z jednej patentovej rodiny a majú rovnaké frekvencie.
+    # The domain anchor applies to every candidate, not only in fallback mode.
+    # The publication branch has had this condition for some time; the patent
+    # branch did not, so a patent linked to the query by nothing but generic
+    # technical vocabulary could pass even the main threshold. Term-rarity
+    # weighting does not catch this when all candidates come from one patent
+    # family and therefore share the same term frequencies.
     on_topic = [c for c in candidates if _shares_discriminative_term(query, c)]
     primary = [
         candidate
@@ -472,10 +474,10 @@ def _rank(
     if primary:
         ranked = primary
     elif allow_low_confidence:
-        # Aj v núdzovom režime musí kandidát prekročiť minimálne skóre a zároveň
-        # zdieľať s dotazom aspoň jeden rozlišujúci termín. Bez druhej podmienky
-        # sa do reportu dostávali patenty, ktoré s dotazom spájala len všeobecná
-        # technická slovná zásoba (method, system, device).
+        # Even in fallback mode a candidate must clear the minimum score and also
+        # share at least one discriminating term with the query. Without the
+        # second condition, patents reached the report that were linked to the
+        # query by generic technical vocabulary alone (method, system, device).
         ranked = [candidate for candidate in on_topic if candidate.score >= MIN_RELEVANCE_FLOOR]
     else:
         ranked = []
@@ -484,7 +486,7 @@ def _rank(
 
 
 def _patent_query_variants(normalized_query: str, max_variants: int = 3) -> list[str]:
-    """Vytvorí obmedzený počet interných variantov patentového dotazu."""
+    """Build a bounded number of internal patent query variants."""
     text = (normalized_query or "").strip()
     if not text:
         return []
@@ -505,7 +507,7 @@ def _patent_query_variants(normalized_query: str, max_variants: int = 3) -> list
 
 
 async def patent_search(query: str, max_results: int = 10) -> str:
-    """Vyhľadá patentové výsledky vo viacerých dostupných zdrojoch."""
+    """Search for patent results across the available providers."""
     normalized_query = _normalize_query(query)
     search_query = _provider_query(normalized_query)
     limit = max(1, min(max_results, MAX_RESULTS_CAP))
@@ -532,7 +534,7 @@ async def patent_search(query: str, max_results: int = 10) -> str:
     completed_providers: list[str] = []
 
     async def _run_provider_variant(provider_name: str, provider, variant: str):
-        """Spustí jeden provider s jedným variantom dotazu a zachytí chyby."""
+        """Run one provider with one query variant and capture any errors."""
         try:
             candidates = await provider(client, variant, limit)
             return ("ok", provider_name, variant, candidates)
