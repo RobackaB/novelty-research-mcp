@@ -1,4 +1,4 @@
-"""Testy čistenia vstupných dotazov."""
+"""Tests of input query cleaning."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Testy lokálneho hodnotenia relevancie."""
+"""Tests of local relevance scoring."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ def test_tokens_remove_stopwords_and_stem():
     result = tokens("the anomaly detection systems are running")
     assert "the" not in result
     assert "are" not in result
-    # "detection" a "systems" sa zjednodušia na približný koreň slova.
+    # "detection" and "systems" are reduced to an approximate word stem.
     assert any(token.startswith("detect") for token in result)
 
 
@@ -62,5 +62,5 @@ def test_discriminative_tokens_drop_generic_terms():
 def test_subject_anchors_strip_mechanism_tokens():
     terms = discriminative_tokens("self-heating lunch box without electricity")
     anchors = subject_anchors(terms)
-    # Zostávajú predmetové tokeny, čisto mechanizmové (self, heating) vypadnú.
+    # Subject tokens remain; purely mechanistic ones (self, heating) drop out.
     assert anchors <= terms

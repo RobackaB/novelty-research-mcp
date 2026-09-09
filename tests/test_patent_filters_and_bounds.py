@@ -1,4 +1,4 @@
-"""Testy patentových filtrov a obmedzenia vyhľadávacích variantov."""
+"""Tests of the patent filters and the bound on search variants."""
 
 from __future__ import annotations
 

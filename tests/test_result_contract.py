@@ -1,4 +1,4 @@
-"""Testy stavových markerov výsledkov."""
+"""Tests of the result status markers."""
 
 from __future__ import annotations
 

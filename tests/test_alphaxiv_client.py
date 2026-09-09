@@ -1,4 +1,4 @@
-"""Testy AlphaXiv MCP klienta cez skutočný in-memory MCP server (bez siete)."""
+"""Tests of the AlphaXiv MCP client against a real in-memory MCP server (no network)."""
 
 from __future__ import annotations
 
@@ -15,10 +15,10 @@ from tools.alphaxiv_client import (
 
 
 def _build_test_server(papers_by_call):
-    """Vytvorí testovací FastMCP server s nástrojom discover_papers.
+    """Build a test FastMCP server exposing a discover_papers tool.
 
-    `papers_by_call` je zoznam odpovedí (jedna na volanie); posledná sa
-    opakuje, ak sa volanie stane viackrát.
+    `papers_by_call` is a list of responses, one per call; the last is repeated
+    if the tool is called more times than there are entries.
     """
     server = FastMCP("alphaxiv-test")
     calls: list[dict] = []

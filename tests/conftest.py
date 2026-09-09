@@ -1,4 +1,4 @@
-"""Spoločné pytest nastavenie pre testy MCP research servera."""
+"""Shared pytest configuration for the MCP research server tests."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 @pytest.fixture()
 def temp_db(tmp_path, monkeypatch):
-    """Nasmeruje SQLite databázu prieskumov do dočasného priečinka testu."""
+    """Point the research SQLite database at the test's temporary directory."""
     db_path = tmp_path / "research_sessions.sqlite3"
     monkeypatch.setenv("RESEARCH_SESSION_DB", str(db_path))
     return db_path

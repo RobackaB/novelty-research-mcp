@@ -1,4 +1,4 @@
-"""Testy odolnosti patent_fetch voči blokovaniu zo strany Google Patents."""
+"""Tests of patent_fetch resilience against blocking by Google Patents."""
 
 from __future__ import annotations
 

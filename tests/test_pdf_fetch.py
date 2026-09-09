@@ -11,7 +11,7 @@ PDF_TEXT = (
 
 
 def _build_pdf(text: str) -> bytes:
-    """Postaví minimálny platný jednostránkový PDF dokument s daným textom."""
+    """Build a minimal valid single-page PDF document containing the given text."""
     stream = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode("latin-1")
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
@@ -53,7 +53,7 @@ def test_extract_pdf_text_rejects_non_pdf():
 
 
 def test_extract_pdf_text_rejects_too_short_text():
-    # Menej ako 12 slov sa nepovažuje za použiteľný obsah dokumentu.
+    # Fewer than 12 words does not count as usable document content.
     assert extract_pdf_text(_build_pdf("just a few words here")) == ""
 
 

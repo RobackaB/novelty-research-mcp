@@ -1,4 +1,4 @@
-"""Testy napojenia AlphaXiv MCP klienta do publikačného vyhľadávania."""
+"""Tests wiring the AlphaXiv MCP client into publication search."""
 
 from __future__ import annotations
 
@@ -94,7 +94,7 @@ async def test_alpha_search_blocks_deduplicates_across_queries(monkeypatch):
         1,
         set(),
     )
-    assert call_count["n"] == 1  # max_results=1 sa dosiahne po prvom dotaze, druhý sa už nespustí
+    assert call_count["n"] == 1  # max_results=1 is reached after the first query, so no second one runs
     assert len(blocks) == 1
 
 

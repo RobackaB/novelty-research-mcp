@@ -1,4 +1,4 @@
-"""Integračné testy SQLite research session workflow (bez siete)."""
+"""Integration tests of the SQLite research session workflow (no network)."""
 
 from __future__ import annotations
 
@@ -184,7 +184,7 @@ def test_full_workflow_to_user_answer(temp_db):
     assert "## Summary" in answer or "## Zhrnutie" in answer
     assert "US1234567B2" in answer
 
-    # Session je po odpovedi uzavretá pre ďalšie zápisy.
+    # After the answer, the session is closed to further writes.
     rejected = json.loads(
         rs.research_session_save_evidence(session_id, "web", _web_pack(), query="another", attempt=2)
     )
@@ -197,11 +197,11 @@ def test_user_answer_unknown_session(temp_db):
 
 
 def test_db_file_not_locked_after_operations(temp_db):
-    """Po každej operácii musia byť SQLite spojenia zatvorené (Windows lock test)."""
+    """SQLite connections must be closed after every operation (Windows lock test)."""
     session_id = json.loads(rs.research_session_start("lock check"))["session_id"]
     rs.research_session_save_evidence(session_id, "web", _web_pack([_strong_web_hit()]), query="lock check", attempt=1)
     renamed = temp_db.with_name("renamed.sqlite3")
-    os.rename(temp_db, renamed)  # Na Windows zlyhá, ak niekto drží otvorený handle.
+    os.rename(temp_db, renamed)  # Fails on Windows if anything still holds an open handle.
     os.rename(renamed, temp_db)
 
 
@@ -216,9 +216,9 @@ def test_build_query_envelope_atoms_for_english_query():
         "allowing time-limited access codes, logging entry history and notifying the owner already exists."
     )
     assert envelope["language"] == "en"
-    assert envelope["critical_requirements_atomic"], "atomický rozklad nemá byť prázdny"
+    assert envelope["critical_requirements_atomic"], "the atomic decomposition must not be empty"
     assert envelope["query_too_generic"] is False
-    assert envelope["query_variants"]["web"], "webové varianty musia existovať"
+    assert envelope["query_variants"]["web"], "web variants must exist"
 
 
 def test_build_query_envelope_generic_query_flagged():
@@ -227,7 +227,7 @@ def test_build_query_envelope_generic_query_flagged():
 
 
 async def test_evidence_to_session_wrapper_with_stub(temp_db, monkeypatch):
-    """Overí celú async cestu web_evidence_to_session so zastubovaným providerom."""
+    """Exercise the whole async web_evidence_to_session path with a stubbed provider."""
 
     async def _fake_pack(**kwargs):
         return _web_pack([_strong_web_hit()])

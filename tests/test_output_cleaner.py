@@ -1,4 +1,4 @@
-"""Testy čistenia a skracovania textu."""
+"""Tests of text cleaning and truncation."""
 
 from __future__ import annotations
 

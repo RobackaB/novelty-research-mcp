@@ -1,4 +1,4 @@
-"""Testy pokrytia prvkov z celých dokumentov: web tokeny, patent description, PDF publikácií."""
+"""Tests of requirement coverage from whole documents: web tokens, patent descriptions, publication PDFs."""
 
 from __future__ import annotations
 
@@ -39,11 +39,12 @@ def test_unique_coverage_tokens_empty():
     assert unique_coverage_tokens(None) == ""
 
 
-# --- Web: COVERAGE_TOKENS z celej stránky ------------------------------------
+# --- Web: COVERAGE_TOKENS from the whole page --------------------------------
 
 def test_fetch_result_coverage_tokens_include_offtopic_sentences():
-    # Veta s "entry history" nemá žiadny prekryv s dotazom, takže sa nedostane
-    # do CONTENT ani ANALYSIS — ale COVERAGE_TOKENS z celej stránky ju obsahujú.
+    # The sentence with "entry history" has no overlap with the query, so it
+    # reaches neither CONTENT nor ANALYSIS. The whole-page COVERAGE_TOKENS still
+    # contain it.
     content = (
         ". ".join(f"Smart lock paragraph about the mobile application number {i}" for i in range(30))
         + ". The device also keeps entry history records."
@@ -70,7 +71,7 @@ async def test_web_pack_coverage_from_full_page_tokens(monkeypatch):
         return search_output
 
     async def fake_fetch(url, timeout_ms=14000, query=""):
-        # CONTENT/ANALYSIS neobsahujú "entry history"; COVERAGE_TOKENS áno.
+        # CONTENT/ANALYSIS do not contain "entry history"; COVERAGE_TOKENS do.
         return (
             f"SOURCE_URL: {url} was the page requested.\n"
             "DATE: Unknown was the best date found.\n"
@@ -123,7 +124,7 @@ async def test_patent_pack_coverage_from_description(monkeypatch):
         )
 
     async def fake_fetch(url, timeout_ms=18000, pdf_url=""):
-        # Nároky pokrývajú len "mobile application"; "entry history" je iba v opise.
+        # The claims cover only "mobile application"; "entry history" is in the description alone.
         return (
             "PATENT_NUMBER: US1234567B2 was identified from the page.\n"
             "FILED: 2020-01-01 was identified on the page.\n"
@@ -178,7 +179,7 @@ def test_patent_fetch_extracts_description_field():
     assert "entry history" in description_line
 
 
-# --- Publikácie: plné PDF texty ------------------------------------------------
+# --- Publications: full PDF texts ---------------------------------------------
 
 def test_direct_pdf_url_for_candidate():
     arxiv = PublicationCandidate(title="t", url="https://arxiv.org/abs/2301.00001", doi="", summary="")
@@ -315,14 +316,14 @@ async def test_publication_pack_fulltext_pdf_coverage(monkeypatch):
     hit = payload["hits"][0]
     assert hit["fulltext_analyzed"] is True
     assert hit["fulltext_word_count"] > 10
-    # Zlyhaný page fetch by dal fetch_failed; plný text ho zdvihne na fetched_excerpt.
+    # A failed page fetch would give fetch_failed; the full text raises it to fetched_excerpt.
     assert hit["evidence_level"] == "fetched_excerpt"
     assert hit["atom_coverage"] == 1.0
     assert hit["exact_combination_candidate_found"] is True
 
 
 async def test_publication_pack_no_pdf_targets_without_atoms(monkeypatch):
-    """Bez atomických požiadaviek sa PDF texty nesťahujú (šetrí sa beh)."""
+    """Without atomic requirements no PDF texts are downloaded, which saves a run."""
     search_output = (
         "STATUS: OK\nCOMPLETED: TRUE\nRELIABLE_NO_RESULTS: FALSE\nERROR_COUNT: 0\n\n"
         "Publication title returned by ArXiv: **Smart lock forensics**.\n"
