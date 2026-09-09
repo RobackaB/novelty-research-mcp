@@ -1,4 +1,4 @@
-"""Načítanie patentovej stránky a extrakcia základných patentových údajov."""
+"""Fetching a patent page and extracting its basic patent fields."""
 
 from __future__ import annotations
 
@@ -28,12 +28,13 @@ _STATIC_PATENT_COUNTRY_RE = re.compile(
     r"/patent/(?P<cc>CN|JP|KR|RU|IN|TW|HK|SG|BR|MX)\d", flags=re.IGNORECASE
 )
 
-# Google patents.google.com aktívne blokuje shlukované automatizované požiadavky
+# patents.google.com actively blocks bursts of automated requests
 # ("...your computer or network may be sending automated queries...", HTTP 503).
-# Live overenie ukázalo, že tento blok sa spúšťa aj pri jednej požiadavke z bežnej
-# siete, keď sa v krátkom čase pošle veľa detailových fetchov naraz — preto
-# obmedzujeme súbežnosť samostatným semaforom nezávisle od toho, koľko patentov
-# sa spracúva paralelne na vyššej úrovni (patent_evidence_pack).
+# Live testing showed the block triggers even on a single request from an
+# ordinary network when many detail fetches are sent in quick succession, so
+# concurrency is capped by a dedicated semaphore independently of how many
+# patents are being processed in parallel at the level above
+# (patent_evidence_pack).
 _GOOGLE_PATENTS_CONCURRENCY = 2
 _GOOGLE_PATENTS_SEMAPHORE = asyncio.Semaphore(_GOOGLE_PATENTS_CONCURRENCY)
 _BOT_BLOCK_MARKERS = (
@@ -44,18 +45,18 @@ _BOT_BLOCK_MARKERS = (
 
 
 def _is_bot_block_page(html: str) -> bool:
-    """Rozpozná Google stránku s upozornením na automatizované požiadavky."""
+    """Recognise the Google page warning about automated queries."""
     lower = (html or "")[:4000].lower()
     return any(marker in lower for marker in _BOT_BLOCK_MARKERS)
 
 
 def _patent_country_prefers_static(url: str) -> bool:
-    """Zistí, či sa stránka patentu má načítať priamo cez statické HTTP."""
+    """Determine whether a patent page should be fetched over plain static HTTP."""
     return bool(_STATIC_PATENT_COUNTRY_RE.search(url or ""))
 
 
 async def _static_patent_fetch(url: str, timeout_ms: int) -> tuple[str, str]:
-    """Načíta patentovú stránku cez HTTP bez použitia prehliadača."""
+    """Fetch a patent page over HTTP without using a browser."""
     timeout_s = max(2.0, min(timeout_ms / 1000.0, 15.0))
     async with httpx.AsyncClient(
         headers={"User-Agent": USER_AGENT},
@@ -71,10 +72,10 @@ async def _static_patent_fetch(url: str, timeout_ms: int) -> tuple[str, str]:
 
 
 async def _wayback_patent_fetch(url: str, timeout_ms: int) -> tuple[str, str]:
-    """Skúsi načítať archivovanú snímku patentovej stránky z Wayback Machine.
+    """Try to read an archived snapshot of a patent page from the Wayback Machine.
 
-    Best-effort náhrada, keď Google Patents zablokuje priamy prístup; Wayback
-    dostupnosť pre konkrétnu stránku nie je garantovaná.
+    A best-effort substitute when Google Patents blocks direct access. Wayback
+    coverage of any particular page is not guaranteed.
     """
     avail_timeout = max(3.0, min(8.0, timeout_ms / 3000))
     async with httpx.AsyncClient(
@@ -100,7 +101,7 @@ async def _wayback_patent_fetch(url: str, timeout_ms: int) -> tuple[str, str]:
 
 
 class BotBlockedError(RuntimeError):
-    """Signalizuje, že zdroj zablokoval prístup ako podozrivý na automatizáciu."""
+    """Raised when a source blocks access as suspected automation."""
 
 
 @dataclass(frozen=True)
@@ -110,10 +111,10 @@ class PatentFetchProvider:
 
 
 async def _google_patents_fetch(url: str, timeout_ms: int) -> tuple[str, str]:
-    """Načíta Google Patents stránku staticky alebo cez Chromium fallback.
+    """Fetch a Google Patents page statically, or through the Chromium fallback.
 
-    Súbežnosť voči patents.google.com je obmedzená spoločným semaforom, aby
-    sa znížila šanca na spustenie ochrany proti automatizovaným požiadavkam.
+    Concurrency against patents.google.com is capped by a shared semaphore, to
+    reduce the chance of tripping its anti-automation protection.
     """
     if _patent_country_prefers_static(url):
         try:
@@ -136,7 +137,7 @@ async def _google_patents_fetch(url: str, timeout_ms: int) -> tuple[str, str]:
 
 PATENT_FETCH_PROVIDERS = (PatentFetchProvider("google_patents", _google_patents_fetch),)
 
-# Markery, podľa ktorých sa v texte oficiálneho PDF rozpozná sekcia nárokov.
+# Markers by which the claims section is recognised in the official PDF text.
 _PDF_CLAIMS_MARKERS = (
     "what is claimed",
     "i claim",
@@ -148,25 +149,26 @@ _PDF_MIN_WORDS = 200
 
 
 def _pdf_claims_present(text: str) -> bool:
-    """Zistí, či text oficiálneho PDF obsahuje sekciu patentových nárokov."""
+    """Determine whether the official PDF text contains a patent claims section."""
     lower = (text or "").lower()
     return any(marker in lower for marker in _PDF_CLAIMS_MARKERS)
 
 
 def _pdf_fields(url: str, pdf_url: str, text: str, attempt_log: list[dict[str, object]]) -> str:
-    """Zostaví výstup patent_fetch z plného textu oficiálneho patentového PDF.
+    """Build the patent_fetch output from the full text of the official patent PDF.
 
-    Patentové PDF majú dvojstĺpcovú sadzbu a pri extrakcii sa riadky oboch
-    stĺpcov prekladajú, takže doslovné znenie jedného nároku sa z nich nedá
-    spoľahlivo odcitovať. Text je však plnohodnotný na overenie pokrytia
-    prvkov dotazu (to pracuje s výskytom termínov), preto sa posiela ako
-    COVERAGE_TOKENS a nie ako čitateľný citát.
+    Patent PDFs are typeset in two columns, and extraction interleaves the lines
+    of both, so the verbatim wording of a single claim cannot be quoted reliably
+    from them. The text is nonetheless sound for checking requirement coverage,
+    which works on term occurrence, so it is passed as COVERAGE_TOKENS rather
+    than as a readable quotation.
     """
     has_claims = _pdf_claims_present(text)
     word_count = len(text.split())
-    # CLAIM1 a ABSTRACT zámerne nesú štandardné "nenájdené" sentinely: doslovný
-    # citát z dvojstĺpcového PDF by bol zlomený, preto sa nezobrazuje ani
-    # nezapočítava do pokrytia. Skutočný obsah dokumentu ide cez COVERAGE_TOKENS.
+    # CLAIM1 and ABSTRACT deliberately carry the standard "not found" sentinels:
+    # a verbatim quote from a two-column PDF would come out broken, so it is
+    # neither displayed nor counted towards coverage. The document's actual
+    # content travels through COVERAGE_TOKENS instead.
     lines = [
         "PATENT_NUMBER: Unknown was identified from the page.",
         "FILED: Unknown was identified on the page.",
@@ -187,13 +189,13 @@ def _pdf_fields(url: str, pdf_url: str, text: str, attempt_log: list[dict[str, o
 
 
 async def _patent_pdf_fetch(pdf_url: str, timeout_ms: int) -> str:
-    """Stiahne oficiálne patentové PDF a vráti z neho extrahovaný text."""
+    """Download the official patent PDF and return the text extracted from it."""
     timeout_s = max(10.0, min(timeout_ms / 1000.0 * 2, 40.0))
     return await pdf_fetch_text(pdf_url, timeout_s=timeout_s, max_pages=30)
 
 
 def _extract_first_claim_from_html(soup: BeautifulSoup) -> str:
-    """Pokúsi sa vytiahnuť prvý patentový nárok zo štruktúry HTML stránky."""
+    """Try to extract the first patent claim from the HTML page structure."""
     claim_container_selectors = (
         "section.claims",
         "[itemprop='claims']",
@@ -226,7 +228,7 @@ def _extract_first_claim_from_html(soup: BeautifulSoup) -> str:
 
 
 def _extract_claim1(claim_source: str) -> str:
-    """Pokúsi sa vytiahnuť prvý patentový nárok z textového obsahu stránky."""
+    """Try to extract the first patent claim from the page's text content."""
     start_patterns = [
         r"(?:I claim:|What is claimed(?: is)?:)\s*(?:1\.)?",
         r"^\s*1\.\s*",
@@ -250,7 +252,7 @@ def _extract_claim1(claim_source: str) -> str:
 
 
 def _with_fetch_diagnostics(body: str, provider: str, attempt_log: list[dict[str, object]]) -> str:
-    """Doplní k výstupu fetch nástroja providera a diagnostiku pokusov."""
+    """Add the provider and the attempt diagnostics to a fetch tool's output."""
     return clean_output(
         "\n".join(
             [
@@ -263,7 +265,7 @@ def _with_fetch_diagnostics(body: str, provider: str, attempt_log: list[dict[str
 
 
 def _meta_content(soup: BeautifulSoup, *names_or_props: str) -> str:
-    """Vráti obsah prvého HTML meta tagu so zadaným názvom alebo vlastnosťou."""
+    """Return the content of the first HTML meta tag with the given name or property."""
     for token in names_or_props:
         tag = (
             soup.select_one(f'meta[name="{token}"]')
@@ -276,7 +278,7 @@ def _meta_content(soup: BeautifulSoup, *names_or_props: str) -> str:
 
 
 def _extract_fields(url: str, html: str, rendered_text: str, provider: str, attempt_log: list[dict[str, object]]) -> str:
-    """Vytiahne patentové polia z HTML a textu načítanej stránky."""
+    """Extract the patent fields from the fetched page's HTML and text."""
     soup = BeautifulSoup(html, "lxml")
     for node in soup.select("nav, header, footer, aside, script, style, img, svg, .related, .citations"):
         node.decompose()
@@ -345,11 +347,11 @@ def _extract_fields(url: str, html: str, rendered_text: str, provider: str, atte
 
 
 async def patent_fetch(url: str, timeout_ms: int = 30000, pdf_url: str = "") -> str:
-    """Načíta patentový dokument a vytiahne z neho základné údaje.
+    """Fetch a patent document and extract its basic fields.
 
-    Ak je známa adresa oficiálneho PDF, použije sa prednostne: obsahuje plný
-    text nárokov aj opisu vynálezu a na rozdiel od HTML stránky nepodlieha
-    ochrane proti automatizovaným požiadavkam. HTML stránka slúži ako záloha.
+    When the official PDF address is known it is preferred: it carries the full
+    text of both the claims and the description, and unlike the HTML page it is
+    not behind anti-automation protection. The HTML page serves as the fallback.
     """
     cache_key = f"{url}|{max(5000, min(timeout_ms, 60000))}|{pdf_url}"
     cached = _PATENT_FETCH_CACHE.get(cache_key)

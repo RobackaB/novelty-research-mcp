@@ -1,9 +1,9 @@
-"""Stiahnutie PDF dokumentu a extrakcia textu pre hlbšiu analýzu dôkazov.
+"""Downloading a PDF document and extracting its text for deeper evidence analysis.
 
-PDF zdroje (datasheety, manuály, odborné články) sa predtým zachovávali
-iba ako snippet z vyhľadávača. Tento modul umožňuje spracovať celý
-dokument, takže pokrytie požiadaviek a relevancia sa počítajú z jeho
-skutočného obsahu.
+PDF sources -- datasheets, manuals, scholarly articles -- were previously kept
+only as a search engine snippet. This module makes it possible to process the
+whole document, so requirement coverage and relevance are computed from its
+actual content.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ PDF_MIN_TEXT_WORDS = 12
 
 
 def extract_pdf_text(data: bytes, max_pages: int = PDF_MAX_PAGES) -> str:
-    """Extrahuje čistý text z PDF dát; pri chybe alebo prázdnom obsahu vráti prázdny text."""
+    """Extract plain text from PDF data; return empty text on error or empty content."""
     if not data:
         return ""
     try:
@@ -60,7 +60,7 @@ def extract_pdf_text(data: bytes, max_pages: int = PDF_MAX_PAGES) -> str:
 
 
 def _looks_like_pdf(content_type: str, data: bytes) -> bool:
-    """Overí, či odpoveď skutočne obsahuje PDF dokument."""
+    """Check whether the response really contains a PDF document."""
     if content_type and "pdf" in content_type:
         return True
     return data[:5] == b"%PDF-"
@@ -72,7 +72,7 @@ async def pdf_fetch_text(
     max_pages: int = PDF_MAX_PAGES,
     max_bytes: int = PDF_MAX_BYTES,
 ) -> str:
-    """Stiahne PDF dokument a vráti jeho text; pri akejkoľvek chybe vráti prázdny text."""
+    """Download a PDF document and return its text; return empty text on any error."""
     try:
         async with httpx.AsyncClient(
             headers={"User-Agent": USER_AGENT},

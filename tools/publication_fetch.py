@@ -1,4 +1,4 @@
-"""Načítanie stránky odbornej publikácie a extrakcia metadát."""
+"""Fetching a scholarly publication page and extracting its metadata."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from .output_cleaner import USER_AGENT, clean_output, format_error, trim_words
 
 
 def _meta(soup: BeautifulSoup, selectors: tuple[str, ...]) -> str:
-    """Vráti obsah prvého dostupného CSS selektora s metadátami alebo textom."""
+    """Return the content of the first available CSS selector holding metadata or text."""
     for selector in selectors:
         node = soup.select_one(selector)
         if node:
@@ -23,7 +23,7 @@ def _meta(soup: BeautifulSoup, selectors: tuple[str, ...]) -> str:
 
 
 async def publication_fetch(url: str, timeout_s: float = 12.0) -> str:
-    """Načíta stránku publikácie a vytiahne z nej základné metadáta."""
+    """Fetch a publication page and extract its basic metadata."""
     try:
         html = ""
         async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=max(5.0, min(timeout_s, 30.0))) as client:
