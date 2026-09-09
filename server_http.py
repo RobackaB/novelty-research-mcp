@@ -1,4 +1,4 @@
-"""Streamable HTTP vstupný bod pre Flowise hostovaný v Dockeri."""
+"""Streamable HTTP entry point for Flowise hosted in Docker."""
 
 from __future__ import annotations
 
@@ -11,17 +11,17 @@ from server import mcp
 from terminal_ui import print_startup_banner
 
 def _csv_env(name: str, default: str) -> list[str]:
-    """Načíta premennú prostredia ako zoznam hodnôt oddelených čiarkou."""
+    """Read an environment variable as a comma-separated list of values."""
     value = os.getenv(name, default)
     return [item.strip() for item in value.split(",") if item.strip()]
 
 def _silence_http_clients() -> None:
-    """Stlmí podrobné HTTP logovanie, aby sa do výstupu nedostali citlivé URL adresy."""
+    """Quieten verbose HTTP logging so that sensitive URLs do not reach the output."""
     for name in ("httpx", "httpcore", "hpack", "h11"):
         logging.getLogger(name).setLevel(logging.WARNING)
 
 def main() -> None:
-    """Spustí MCP server cez Streamable HTTP transport."""
+    """Start the MCP server over the Streamable HTTP transport."""
     _silence_http_clients()
     mcp.settings.host = os.getenv("MCP_HOST", "0.0.0.0")
     mcp.settings.port = int(os.getenv("MCP_PORT", "8000"))

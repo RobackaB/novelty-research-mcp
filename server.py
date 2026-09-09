@@ -1,4 +1,4 @@
-"""Registruje MCP nástroje používané výskumným workflow so SQLite úložiskom."""
+"""Registers the MCP tools used by the research workflow with SQLite storage."""
 
 import json
 import logging
@@ -43,7 +43,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _text(value: Any) -> str:
-    """Prevedie voliteľnú hodnotu z MCP vstupu na text."""
+    """Convert an optional value from MCP input into text."""
     return "" if value is None else str(value)
 
 def _safe_writer_ack(
@@ -54,7 +54,7 @@ def _safe_writer_ack(
     status: str,
     message: str,
 ) -> str:
-    """Vytvorí záložnú odpoveď pri chybe, aby nástroj vždy vrátil text do Flowise."""
+    """Build a fallback response on error, so the tool always returns text to Flowise."""
     payload = {
         "schema_version": "research.v1",
         "ok": False,
@@ -269,7 +269,7 @@ async def research_session_user_answer(
     return result
 
 def main() -> None:
-    """Spustí MCP server cez stdio transport na lokálne priame testovanie."""
+    """Start the MCP server over the stdio transport for direct local testing."""
     mcp.run(transport="stdio")
 
 if __name__ == "__main__":
