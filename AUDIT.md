@@ -1,138 +1,146 @@
-# Hĺbkový audit a vylepšenia — Flowise MCP Research Server (v0.9.4)
+# In-depth audit and improvements — Flowise MCP Research Server (v0.9.4)
 
-Tento dokument zhŕňa výsledky hĺbkového auditu celej kódovej základne (~6 700 riadkov Pythonu),
-implementované opravy (v0.2.0), kvalitatívne rozšírenie hĺbkovej analýzy zdrojov (v0.3.0,
-sekcia 8), vylepšenia vyhľadávania a výstupu (v0.4.0, sekcia 9), spracovanie celých
-dokumentov pre pokrytie prvkov (v0.5.0, sekcia 10), skutočnú AlphaXiv MCP integráciu
-(v0.6.0, sekcia 11), opravy vyplývajúce z analýzy skutočného produkčného behu vo
-Flowise (v0.7.0, sekcia 12), obídenie blokovania Google Patents cez oficiálne
-patentové PDF (v0.8.0, sekcia 13), merateľné zlepšenie hodnotenia relevancie
-(v0.9.0, sekcia 14), čistotu textu vo výslednom reporte (v0.9.1, sekcia 15)
-kvalitu patentových výsledkov pri zablokovanom provideri (v0.9.2, sekcia 16)
-a kvalitu patentových nálezov overenú celým behom (v0.9.4, sekcia 17).
-Všetky zmeny sú overené: **270 automatických testov prechádza**, server po
-zmenách naštartoval a MCP `initialize` handshake vrátil platnú odpoveď.
+This document summarises the results of an in-depth audit of the whole codebase
+(~6,700 lines of Python), the fixes implemented (v0.2.0), the qualitative extension of
+deep source analysis (v0.3.0, section 8), the search and output improvements (v0.4.0,
+section 9), whole-document processing for requirement coverage (v0.5.0, section 10), the
+real AlphaXiv MCP integration (v0.6.0, section 11), the fixes that came out of analysing
+an actual production run in Flowise (v0.7.0, section 12), working around the Google
+Patents block through the official patent PDFs (v0.8.0, section 13), the measurable
+improvement in relevance scoring (v0.9.0, section 14), text quality in the final report
+(v0.9.1, section 15), patent result quality when the provider is blocked (v0.9.2,
+section 16) and patent hit quality verified by a full run (v0.9.4, section 17).
+Every change is verified: **270 automated tests pass**, the server started after the
+changes and the MCP `initialize` handshake returned a valid response.
 
-## 1. Opravené chyby (korektnosť)
+## 1. Fixed defects (correctness)
 
-### 1.1 OpenAlex provider bol úplne nefunkčný — `tools/publications_search.py`
-`_openalex_search` posielal do OpenAlex API parameter `select` s neexistujúcim poľom
-`authors_count`. API na to odpovedá **HTTP 400** pri každom volaní a výnimka sa potichu
-zahadzovala v `_openalex_blocks_safe`, takže jeden z piatich publikačných providerov
-nikdy nevrátil žiadny výsledok. Overené živým volaním API pred opravou (400) aj po nej (200).
-**Oprava:** odstránené neplatné pole zo `select`.
+### 1.1 The OpenAlex provider was entirely non-functional — `tools/publications_search.py`
+`_openalex_search` sent the OpenAlex API a `select` parameter containing a field that does
+not exist, `authors_count`. The API answers **HTTP 400** to every such call, and the
+exception was silently swallowed in `_openalex_blocks_safe`, so one of the five publication
+providers never returned a single result. Verified by a live API call both before the fix
+(400) and after it (200).
+**Fix:** the invalid field was removed from `select`.
 
-### 1.2 Chybná logika pokrytia požiadaviek v reporte — `tools/user_answer.py`
-V záložnej vetve `_render_uncertainty_section` sa porovnával **počet** pokrytých požiadaviek
-zdroja s **poradovým číslom** požiadavky (`count >= index`). Výsledok: report mohol tvrdiť
-„verified disclosure by: patent", aj keď zdroj overil úplne inú požiadavku. Navyše sa
-používali labely (`verified_disclosure_by`, `not_verified`), ktoré v slovníku labelov
-neexistovali, takže slovenský report obsahoval anglické frázy.
-**Oprava:** záložná vetva teraz zobrazuje čestný per-zdrojový súhrn („patent: 2/5 požiadaviek
-plne overených") a pre detailné pokrytie po prvkoch sa vždy, keď existujú kritické požiadavky,
-generujú „pseudo-atómy", takže tabuľka *Element-by-element coverage* sa zobrazí aj bez
-atomického rozkladu. Pseudo-atómy sa používajú **iba na zobrazenie** — logika verdiktu
-a dôvery zostáva nezmenená.
+### 1.2 Faulty requirement-coverage logic in the report — `tools/user_answer.py`
+In the fallback branch of `_render_uncertainty_section`, the **number** of requirements a
+source covered was compared against the requirement's **index** (`count >= index`). The
+result: the report could claim "verified disclosure by: patent" even when the source had
+verified an entirely different requirement. It also used labels
+(`verified_disclosure_by`, `not_verified`) that did not exist in the label dictionary, so
+the Slovak report contained English phrases.
+**Fix:** the fallback branch now shows an honest per-source summary ("patent: 2/5
+requirements fully verified"), and whenever critical requirements exist, "pseudo-atoms" are
+generated for the element-by-element detail, so the *Element-by-element coverage* table
+appears even without an atomic decomposition. Pseudo-atoms are used **for display only** —
+the verdict and confidence logic is unchanged.
 
-### 1.3 Únik SQLite spojení — `tools/research_session.py`
-`with _connect() as conn:` využíval kontextový manažér `sqlite3.Connection`, ktorý transakciu
-commitne/rollbackne, ale **spojenie nikdy nezatvorí**. Každé volanie nástroja tak nechalo
-otvorený handle na databázu (a WAL/SHM súbory) až do garbage collection — problém pre
-dlhobežiaci server aj pre Windows (zamknuté súbory).
-**Oprava:** `_connect()` je teraz `@contextmanager`, ktorý spojenie po použití vždy zavrie.
-Existujúcich ~20 volacích miest funguje bez zmeny. Nový test `test_db_file_not_locked_after_operations`
-overuje, že po operáciách sa dá databázový súbor na Windows premenovať (t. j. nie je držaný handle).
+### 1.3 SQLite connection leak — `tools/research_session.py`
+`with _connect() as conn:` relied on the `sqlite3.Connection` context manager, which
+commits or rolls back the transaction but **never closes the connection**. Every tool call
+therefore left an open handle on the database (and on the WAL/SHM files) until garbage
+collection — a problem both for a long-running server and on Windows, where the files stay
+locked.
+**Fix:** `_connect()` is now a `@contextmanager` that always closes the connection after
+use. The roughly 20 existing call sites work unchanged. A new test,
+`test_db_file_not_locked_after_operations`, verifies that the database file can be renamed
+on Windows after the operations complete, meaning no handle is held.
 
-### 1.4 Zastarané arXiv API — `tools/arxiv_search.py`
-Používalo sa deprecated `Search.results()` (odstraňované v novších verziách knižnice `arxiv`).
-**Oprava:** prechod na `arxiv.Client(...).results(search)` s obmedzeným `page_size` a retry.
+### 1.4 Deprecated arXiv API — `tools/arxiv_search.py`
+The deprecated `Search.results()` was in use, which newer versions of the `arxiv` library
+are removing.
+**Fix:** moved to `arxiv.Client(...).results(search)` with a bounded `page_size` and retry.
 
-### 1.5 Startup banner ukazoval neexistujúce nástroje — `terminal_ui.py`
-Banner vypisoval štyri staré názvy (`patent_evidence_pack`, `merge_evidence_pack`, ...),
-ktoré server vôbec neregistruje.
-**Oprava:** banner vypisuje presne 7 registrovaných MCP nástrojov; test kontroluje zhodu
-so skutočnou registráciou cez `server.mcp.list_tools()`.
+### 1.5 The startup banner listed tools that do not exist — `terminal_ui.py`
+The banner printed four old names (`patent_evidence_pack`, `merge_evidence_pack`, ...)
+that the server does not register at all.
+**Fix:** the banner prints exactly the 7 registered MCP tools; a test checks this against
+the actual registration through `server.mcp.list_tools()`.
 
-### 1.6 Neobmedzený rast cache v pamäti — `tools/patent_search.py`, `tools/patent_fetch.py`
-`_PATENT_SEARCH_CACHE` aj `_PATENT_FETCH_CACHE` boli obyčajné slovníky bez limitu — pamäť
-dlhobežiaceho servera rástla bez obmedzenia.
-**Oprava:** nový modul `tools/_ttl_cache.py` (`TTLCache`) s TTL aj stropom počtu záznamov
-(64 pre vyhľadávanie, 256 pre fetch) a LRU-štýlovým vyraďovaním najstarších položiek.
+### 1.6 Unbounded in-memory cache growth — `tools/patent_search.py`, `tools/patent_fetch.py`
+Both `_PATENT_SEARCH_CACHE` and `_PATENT_FETCH_CACHE` were plain dictionaries with no
+limit, so the memory of a long-running server grew without bound.
+**Fix:** a new module `tools/_ttl_cache.py` (`TTLCache`) with both a TTL and a cap on the
+number of records (64 for search, 256 for fetch), evicting the oldest entries LRU-style.
 
-### 1.7 Pád zápisu pri poškodených dátach providera — `tools/research_session.py`
-`_insert_raw_items` volal `float(hit.get("relevance_score") ...)` bez ochrany — nečíselná
-hodnota od providera zhodila celý zápis dôkazov.
-**Oprava:** nový `_safe_float` helper; rovnaké bezpečné pretypovanie aj v `_row_quality_key`.
+### 1.7 Write crash on malformed provider data — `tools/research_session.py`
+`_insert_raw_items` called `float(hit.get("relevance_score") ...)` unguarded, so a
+non-numeric value from a provider brought down the entire evidence write.
+**Fix:** a new `_safe_float` helper, with the same safe conversion applied in
+`_row_quality_key`.
 
-### 1.8 Playwright ako tvrdá závislosť — `tools/chromium_scraper.py`
-Import Playwrightu na úrovni modulu znamenal, že bez nainštalovaného Playwrightu sa nedal
-importovať ani celý balík `tools` (a teda ani spustiť server či testy).
-**Oprava:** lenivý import vnútri funkcie + náhradná trieda `PlaywrightTimeoutError`.
-Web/patent fetch fallbacky (Jina, Wayback, Crossref, statické HTTP) tento stav už korektne
-zachytávajú, takže server je použiteľný aj bez Chromium vrstvy.
+### 1.8 Playwright as a hard dependency — `tools/chromium_scraper.py`
+Importing Playwright at module level meant that without Playwright installed the whole
+`tools` package could not be imported, and therefore neither the server nor the tests could
+run.
+**Fix:** a lazy import inside the function plus a substitute `PlaywrightTimeoutError` class.
+The web and patent fetch fallbacks (Jina, Wayback, Crossref, static HTTP) already handle
+this state correctly, so the server is usable without the Chromium layer.
 
-## 2. Menšie opravy a čistenie
+## 2. Minor fixes and cleanup
 
-- `tools/evidence_quality.py`: zlúčená duplicitná vetva `weak` a odstránená mŕtva premenná.
-- `tools/patent_search.py`: odstránená mŕtva funkcia `_matches_required_concept` (vždy vracala True).
-- `tools/web_evidence_pack.py`: podmienka preskočenia nepodporovaných URL bola nedosiahnuteľná,
-  lebo titulok má vždy placeholder „Untitled result" — placeholder sa už nepočíta ako reálny titulok.
-- `tools/user_answer.py` `_detect_language`: envelope hodnota `non_english` (ktorú reálne generuje
-  `research_session._detect_query_language`) sa teraz mapuje priamo na slovenský výstup;
-  predtým sa spoliehalo len na regex nad dotazom.
-- `tools/research_session.py`: `trace_events` filter `source_type != ''` (stĺpec je NOT NULL),
-  odstránené duplicitné hodnotenie kvality v `_row_quality_key`, presunuté importy pred `LOGGER`.
-- `tools/web_search.py`: kozmetika (f-string bez placeholderu).
+- `tools/evidence_quality.py`: the duplicated `weak` branch was merged and a dead variable removed.
+- `tools/patent_search.py`: the dead function `_matches_required_concept` was removed (it always returned True).
+- `tools/web_evidence_pack.py`: the condition skipping unsupported URLs was unreachable,
+  because the title always carries the placeholder "Untitled result" — the placeholder no longer counts as a real title.
+- `tools/user_answer.py` `_detect_language`: the envelope value `non_english` (which
+  `research_session._detect_query_language` genuinely produces) now maps directly to Slovak output;
+  previously it relied on a regex over the query alone.
+- `tools/research_session.py`: the `trace_events` filter `source_type != ''` (the column is NOT NULL),
+  duplicate quality scoring removed from `_row_quality_key`, imports moved above `LOGGER`.
+- `tools/web_search.py`: cosmetic (an f-string with no placeholder).
 
-## 3. Konfigurácia a nasadenie
+## 3. Configuration and deployment
 
-- **`pyproject.toml`**: verzia 0.2.0; doplnené `server_http` a `terminal_ui` do `py-modules`
-  (predtým `pip install .` nezahŕňal HTTP vstupný bod); nový skript `mcp-research-server-http`;
-  `[project.optional-dependencies] dev` (pytest, pytest-asyncio); `[tool.pytest.ini_options]`.
-- **`.env.example`**: doplnené všetky premenné, ktoré kód reálne číta a chýbali:
+- **`pyproject.toml`**: version 0.2.0; `server_http` and `terminal_ui` added to `py-modules`
+  (previously `pip install .` did not include the HTTP entry point); a new
+  `mcp-research-server-http` script; `[project.optional-dependencies] dev` (pytest,
+  pytest-asyncio); `[tool.pytest.ini_options]`.
+- **`.env.example`**: every variable the code actually reads but that was missing has been added:
   `PUBMED_API_KEY`, `ALPHA_CLI_PATH`, `FLOWISE_USERNAME/PASSWORD`, `MCP_HOST/PORT/PATH`,
   `MCP_ALLOWED_HOSTS/ORIGINS`, `RESEARCH_SESSION_DB`, `NO_COLOR`/`MCP_PLAIN_UI`/`MCP_NO_UI`.
-- **`docker-compose.yml`**: pridaný passthrough `PUBMED_API_KEY`; healthcheck MCP servera
-  (TCP kontrola portu 8000); Flowise teraz čaká na `condition: service_healthy`, takže sa
-  nespustí skôr, než je MCP server pripravený.
-- **`Dockerfile`**: `HEALTHCHECK` inštrukcia pre samostatné spustenie mimo compose.
+- **`docker-compose.yml`**: `PUBMED_API_KEY` passthrough added; a healthcheck for the MCP
+  server (a TCP check on port 8000); Flowise now waits on `condition: service_healthy`, so it
+  does not start before the MCP server is ready.
+- **`Dockerfile`**: a `HEALTHCHECK` instruction for running standalone outside compose.
 
-## 4. Nová testovacia sada (predtým: žiadne testy)
+## 4. New test suite (previously: no tests)
 
-`tests/` — **126 testov**, všetky bez prístupu na sieť (siete sa stubujú cez monkeypatch):
+`tests/` — **126 tests**, none of which touch the network (network access is stubbed via monkeypatch):
 
-| Súbor | Pokrýva |
+| File | Covers |
 |---|---|
-| `test_query_normalize.py` | čistenie dotazov z Flowise (dict/JSON/list vstupy) |
-| `test_relevance.py` | tokenizácia, skórovanie, prahy relevancie, subject anchors |
-| `test_result_contract.py` | stavové markery a ich round-trip parsovanie |
-| `test_evidence_quality.py` | známkovanie zdrojov, verdikty, dôvera, degradácie |
-| `test_hit_sort_and_cache.py` | triedenie nálezov, TTLCache (expirácia, vyraďovanie) |
-| `test_patent_filters_and_bounds.py` | extrakcia patentových čísel, validácia výsledkov, plán dotazov |
-| `test_merge_evidence_pack.py` | zlučovanie zdrojov, legacy bundle, opravy URL, flagy |
-| `test_final_answer_pack.py` | debug report, sekcie, konzervatívne správanie pri chybe |
-| `test_user_answer.py` | payload odpovede, jazyk (SK/EN), tabuľka pokrytia, pseudo-atómy |
-| `test_research_session.py` | celý SQLite workflow: start → understand → save → checklist → answer, duplicity, budget, uzavretá session, zamykanie súborov, async writery so stubmi |
-| `test_evidence_packs_stubbed.py` | patent/publication/web evidence pack pipeline so zastubovanou sieťou |
-| `test_web_and_publication_helpers.py` | tracking parametre, low-value URL, MDPI→DOI, PubMed XML, OpenAlex abstrakt |
-| `test_server_and_ui.py` | registrácia presne 7 MCP nástrojov, `_safe_writer_ack`, banner |
-| `test_output_cleaner.py` | čistenie HTML, claim coverage, normalizácia identity patentu |
+| `test_query_normalize.py` | cleaning queries from Flowise (dict/JSON/list inputs) |
+| `test_relevance.py` | tokenisation, scoring, relevance thresholds, subject anchors |
+| `test_result_contract.py` | status markers and their round-trip parsing |
+| `test_evidence_quality.py` | source grading, verdicts, confidence, degradations |
+| `test_hit_sort_and_cache.py` | hit ordering, TTLCache (expiry, eviction) |
+| `test_patent_filters_and_bounds.py` | patent number extraction, result validation, query plan |
+| `test_merge_evidence_pack.py` | merging sources, the legacy bundle, URL repairs, flags |
+| `test_final_answer_pack.py` | the debug report, its sections, conservative behaviour on error |
+| `test_user_answer.py` | the answer payload, language (SK/EN), the coverage table, pseudo-atoms |
+| `test_research_session.py` | the whole SQLite workflow: start → understand → save → checklist → answer, duplicates, budget, a closed session, file locking, async writers with stubs |
+| `test_evidence_packs_stubbed.py` | the patent/publication/web evidence pack pipeline with the network stubbed |
+| `test_web_and_publication_helpers.py` | tracking parameters, low-value URLs, MDPI→DOI, PubMed XML, the OpenAlex abstract |
+| `test_server_and_ui.py` | registration of exactly 7 MCP tools, `_safe_writer_ack`, the banner |
+| `test_output_cleaner.py` | HTML cleaning, claim coverage, normalising patent identity |
 
-Spustenie: `pip install -e .[dev]` (alebo `pip install pytest pytest-asyncio`) a `python -m pytest`.
+To run: `pip install -e .[dev]` (or `pip install pytest pytest-asyncio`) and `python -m pytest`.
 
-## 5. Overenie funkčnosti
+## 5. Functional verification
 
-1. `python -m compileall` — bez chýb.
+1. `python -m compileall` — no errors.
 2. `python -m pytest tests` — **126 passed**.
-3. `python server_http.py` — server naštartoval, `POST /mcp` s JSON-RPC `initialize`
-   vrátil **HTTP 200** a platný `serverInfo` ("Research Server").
+3. `python server_http.py` — the server started, and `POST /mcp` with a JSON-RPC `initialize`
+   returned **HTTP 200** and a valid `serverInfo` ("Research Server").
 
-## 6. Čo sa zámerne nemenilo
+## 6. What was deliberately left unchanged
 
-- Rozhrania všetkých 7 MCP nástrojov (mená, parametre, tvar JSON odpovedí) — plná
-  kompatibilita s exportovanou Flowise architektúrou `flowise_architecture/Flowise_agent.json`.
-- Logika verdiktov a dôvery (`decide_verdict_and_confidence`) — správanie je teraz
-  zafixované testami, nie zmenené.
+- The interfaces of all 7 MCP tools (names, parameters, the shape of the JSON responses) —
+  fully compatible with the exported Flowise architecture `flowise_architecture/Flowise_agent.json`.
+- The verdict and confidence logic (`decide_verdict_and_confidence`) — its behaviour is now
+  pinned by tests, not changed.
 - Deterministický charakter systému (žiadne LLM volania na strane servera).
 
 ## 8. Hĺbková analýza zdrojov (v0.3.0)
