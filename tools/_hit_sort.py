@@ -1,4 +1,4 @@
-"""Spoločné zoradenie nájdených dôkazov podľa relevancie."""
+"""Shared ordering of retrieved evidence by relevance."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ _RELEVANCE_RANK: dict[str, int] = {
 
 
 def _hit_sort_key(hit: dict[str, Any]) -> tuple[int, float]:
-    """Určí poradie jedného nálezu podľa typu relevancie a číselného skóre."""
+    """Determine one hit's ordering by its relevance type and numeric score."""
     rel = str(hit.get("relevance") or "").strip().lower()
     rank = _RELEVANCE_RANK.get(rel, 0)
     try:
@@ -28,5 +28,5 @@ def _hit_sort_key(hit: dict[str, Any]) -> tuple[int, float]:
 
 
 def sort_hits_by_relevance(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Vráti nový zoznam nálezov zoradený podľa typu relevancie a skóre."""
+    """Return a new list of hits ordered by relevance type and score."""
     return sorted(hits, key=_hit_sort_key, reverse=True)

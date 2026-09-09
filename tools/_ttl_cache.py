@@ -1,4 +1,4 @@
-"""Jednoduchá TTL cache s obmedzenou veľkosťou pre dlhobežiaci server."""
+"""A simple size-bounded TTL cache for a long-running server."""
 
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ V = TypeVar("V")
 
 
 class TTLCache(Generic[K, V]):
-    """Cache s časovou platnosťou položiek a maximálnym počtom záznamov.
+    """A cache with per-entry expiry and a maximum number of records.
 
-    Po prekročení kapacity sa odstráni najstaršia položka, takže pamäť
-    dlhobežiaceho servera nerastie bez obmedzenia.
+    Once capacity is exceeded the oldest entry is evicted, so the memory of a
+    long-running server does not grow without bound.
     """
 
     def __init__(self, ttl_seconds: float, max_entries: int = 128) -> None:
@@ -23,7 +23,7 @@ class TTLCache(Generic[K, V]):
         self._data: OrderedDict[K, tuple[float, V]] = OrderedDict()
 
     def get(self, key: K) -> V | None:
-        """Vráti platnú hodnotu z cache alebo None pri chýbajúcej či expirovanej položke."""
+        """Return a valid cached value, or None if the entry is missing or expired."""
         entry = self._data.get(key)
         if entry is None:
             return None
@@ -35,14 +35,14 @@ class TTLCache(Generic[K, V]):
         return value
 
     def set(self, key: K, value: V) -> None:
-        """Uloží hodnotu a pri preplnení odstráni najstaršie položky."""
+        """Store a value, evicting the oldest entries when the cache is full."""
         self._data[key] = (time.time(), value)
         self._data.move_to_end(key)
         while len(self._data) > self._max_entries:
             self._data.popitem(last=False)
 
     def clear(self) -> None:
-        """Vyprázdni celú cache."""
+        """Empty the whole cache."""
         self._data.clear()
 
     def __len__(self) -> int:

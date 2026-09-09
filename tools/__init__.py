@@ -1,4 +1,4 @@
-"""Exporty funkcií používaných finálnym MCP pracovným tokom."""
+"""Exports of the functions used by the final MCP workflow."""
 
 from .research_session import (
     patent_evidence_to_session,

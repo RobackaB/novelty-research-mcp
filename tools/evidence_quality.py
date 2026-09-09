@@ -1,4 +1,4 @@
-"""Pomocné funkcie na hodnotenie kvality zdrojov a určenie predbežného záveru."""
+"""Helpers for grading source quality and deciding a preliminary verdict."""
 
 from __future__ import annotations
 
@@ -16,37 +16,37 @@ QUALITY_GRADES = {"strong", "medium", "weak", "failed_retrieval", "reliable_no_r
 VERDICTS = {"exact_match", "close_prior_art", "adjacent_only", "no_reliable_prior_art", "partial_retrieval"}
 CONFIDENCES = {"high", "medium", "low"}
 RETRIEVAL_STATES = {
-    "complete",            # všetky zdroje sú použiteľné
-    "partial",             # aspoň jeden zdroj je slabý, zlyhal alebo chýba
-    "degraded",            # vyskytlo sa zlyhanie poskytovateľa, timeout alebo limit požiadaviek
-    "mixed_partial",       # zmiešaná kvalita zdrojov
-    "reliable_no_results", # všetky zdroje spoľahlivo vrátili nulové výsledky
-    "failed",              # všetky zdroje zlyhali alebo chýbajú
+    "complete",            # every source is usable
+    "partial",             # at least one source is weak, failed or missing
+    "degraded",            # a provider failure, timeout or rate limit occurred
+    "mixed_partial",       # mixed source quality
+    "reliable_no_results", # every source reliably returned no results
+    "failed",              # every source failed or is missing
 }
 
 
 def _as_list(value: Any) -> list[Any]:
-    """Vráti hodnotu ako zoznam alebo prázdny zoznam."""
+    """Return the value as a list, or an empty list."""
     return value if isinstance(value, list) else []
 
 
 def _is_generic(hit: dict[str, Any]) -> bool:
-    """Zistí, či je nález označený ako príliš všeobecný."""
+    """Determine whether a hit is marked as too generic."""
     return str(hit.get("relevance") or "").strip().lower() == "generic"
 
 
 def _is_adjacent_or_generic(hit: dict[str, Any]) -> bool:
-    """Zistí, či je nález len nepriamy, slabšie súvisiaci alebo príliš všeobecný."""
+    """Determine whether a hit is merely indirect, weakly related or too generic."""
     return str(hit.get("relevance") or "").strip().lower() in {"generic", "adjacent", "loose"}
 
 
 def _is_direct(hit: dict[str, Any]) -> bool:
-    """Zistí, či je nález presný, priamy alebo zameraný na dotaz."""
+    """Determine whether a hit is exact, direct or focused on the query."""
     return str(hit.get("relevance") or "").strip().lower() in {"direct", "focused", "exact"}
 
 
 def hit_quality_score(hit: dict[str, Any], source_type: str = "") -> float:
-    """Vypočíta ohraničené skóre kvality z očistených metadát nálezu."""
+    """Compute a bounded quality score from a hit's cleaned metadata."""
     try:
         base = float(hit.get("relevance_score") or hit.get("score") or 0.0)
     except (TypeError, ValueError):
@@ -75,7 +75,7 @@ def hit_quality_score(hit: dict[str, Any], source_type: str = "") -> float:
 
 
 def grade_source(source: dict[str, Any] | None, source_type: str = "") -> dict[str, Any]:
-    """Vyhodnotí kvalitu jedného zdroja bez sprístupnenia surových dôkazov."""
+    """Grade one source's quality without exposing the raw evidence."""
     if not source:
         return {
             "quality_grade": "missing",
@@ -156,7 +156,7 @@ def grade_source(source: dict[str, Any] | None, source_type: str = "") -> dict[s
 
 
 def _classify_retrieval(source_grades: dict[str, dict[str, Any]]) -> str:
-    """Určí celkový stav získavania dát podľa kvality jednotlivých zdrojov."""
+    """Determine the overall retrieval state from the individual source grades."""
     grades = [str(item.get("quality_grade") or "missing") for item in source_grades.values()]
     if not grades:
         return "failed"
@@ -188,7 +188,7 @@ def decide_verdict_and_confidence(
     single_hit_full_coverage: bool = False,
     original_query: str = "",
 ) -> tuple[str, str, str]:
-    """Určí predbežný verdikt, dôveru a stav získavania dát."""
+    """Determine the preliminary verdict, the confidence and the retrieval state."""
     del original_query
     grades = [str(item.get("quality_grade") or "missing") for item in source_grades.values()]
     strong_count = grades.count("strong")

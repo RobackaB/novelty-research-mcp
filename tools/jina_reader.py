@@ -1,4 +1,4 @@
-"""Záložné načítanie webovej stránky cez službu r.jina.ai."""
+"""Fallback web page fetching through the r.jina.ai service."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from .output_cleaner import USER_AGENT, clean_output
 
 
 def _jina_headers() -> dict[str, str]:
-    """Zostaví hlavičky pre Jina Reader; s kľúčom má vyšší limit požiadaviek."""
+    """Build the headers for the Jina Reader; with a key the rate limit is higher."""
     headers = {"User-Agent": USER_AGENT}
     api_key = os.getenv("JINA_API_KEY", "").strip()
     if api_key:
@@ -19,7 +19,7 @@ def _jina_headers() -> dict[str, str]:
 
 
 async def fetch_via_jina(url: str, timeout_s: float = 20.0) -> str:
-    """Načíta stránku cez Jina Reader a vráti očistený text."""
+    """Fetch a page through the Jina Reader and return its cleaned text."""
     reader_url = f"https://r.jina.ai/{url}"
     async with httpx.AsyncClient(
         follow_redirects=True,
