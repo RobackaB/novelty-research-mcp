@@ -1,4 +1,4 @@
-"""Testy opraveného stemmera, IDF váženia a regresná poistka kvality."""
+"""Tests of the fixed stemmer, IDF weighting and the quality regression guard."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from tools.relevance import (
 # --- Oprava stemmera ---------------------------------------------------------
 
 def test_singular_and_plural_now_share_a_stem():
-    """Pôvodne sa 'log'/'logs' ani 'application'/'applications' nikdy nezhodovali."""
+    """Originally neither 'log'/'logs' nor 'application'/'applications' ever matched."""
     assert _stem("logs") == _stem("log")
     assert _stem("applications") == _stem("application")
     assert _stem("events") == _stem("event")
@@ -33,7 +33,7 @@ def test_singular_and_plural_now_share_a_stem():
 
 
 def test_double_s_words_are_not_over_stemmed():
-    """Slová končiace na 'ss' nesmú prísť o koncovku ('process' != 'proces')."""
+    """Words ending in 'ss' must not lose the ending ('process' != 'proces')."""
     assert _stem("process") == "process"
     assert _stem("processes") == _stem("process")
     assert _stem("class") == "class"
@@ -48,7 +48,7 @@ def test_log_document_now_overlaps_log_query():
     assert tokens("log records") & tokens("system logs")
 
 
-# --- IDF nad množinou kandidátov ---------------------------------------------
+# --- IDF over the candidate set -----------------------------------------------
 
 def test_build_corpus_idf_needs_minimum_corpus():
     assert build_corpus_idf([]) == {}
@@ -63,7 +63,7 @@ def test_rare_terms_weigh_more_than_common_terms():
         "machine learning detection of anomalies in network traffic",
     ]
     idf = build_corpus_idf(docs)
-    # "machine"/"learning" sú vo všetkých dokumentoch, "logs" iba v jednom.
+    # "machine"/"learning" appear in every document, "logs" in only one.
     assert idf[_stem("logs")] > idf[_stem("machine")]
     assert idf[_stem("logs")] > idf[_stem("learning")]
 
@@ -93,7 +93,7 @@ def test_evidence_score_without_idf_keeps_previous_behaviour():
     )
 
 
-# --- Doménová kotva ----------------------------------------------------------
+# --- Domain anchor ------------------------------------------------------------
 
 def test_salient_tokens_are_the_rarest_query_terms():
     docs = [
@@ -112,7 +112,7 @@ def test_salient_tokens_empty_without_idf():
     assert salient_query_tokens("any query text here", {}) == set()
 
 
-# --- Determinizmus výberu kotiev ---------------------------------------------
+# --- Determinism of anchor selection ------------------------------------------
 
 def test_tied_tokens_break_deterministically_by_token():
     """Anchors must not depend on set iteration order.
@@ -188,16 +188,16 @@ def test_document_without_any_salient_term_is_rejected():
     assert is_relevant(query, docs[1], "PUBLICATION", threshold=1.0, idf=idf) is False
 
 
-# --- Regresná poistka kvality ------------------------------------------------
+# --- Quality regression guard -------------------------------------------------
 
 def test_eval_dataset_loads_and_is_labelled():
     data = load_dataset()
-    assert data["queries"], "dataset nesmie byť prázdny"
+    assert data["queries"], "the dataset must not be empty"
     for entry in data["queries"]:
         labels = {int(c["label"]) for c in entry["candidates"]}
         assert labels <= {0, 1}
-        assert 1 in labels, f"{entry['id']} musí obsahovať aspoň jeden relevantný dokument"
-        assert 0 in labels, f"{entry['id']} musí obsahovať aspoň jeden nerelevantný dokument"
+        assert 1 in labels, f"{entry['id']} must contain at least one relevant document"
+        assert 0 in labels, f"{entry['id']} must contain at least one non-relevant document"
 
 
 def test_relevance_quality_does_not_regress():
@@ -251,7 +251,7 @@ def test_sweep_covers_every_production_threshold():
 
 
 def test_idf_improves_precision_over_unweighted_baseline():
-    """IDF váženie musí byť merateľne lepšie než pôvodné rovnaké váhy."""
+    """IDF weighting must be measurably better than the original equal weights."""
     _r_off, summary_off = evaluate_dataset(use_idf=False)
     _r_on, summary_on = evaluate_dataset(use_idf=True)
     assert summary_on["precision"] > summary_off["precision"]

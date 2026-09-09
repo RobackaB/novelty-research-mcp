@@ -1,4 +1,4 @@
-"""Testy zlučovania dôkazov do spoločného wrapperu."""
+"""Tests of merging evidence into the shared wrapper."""
 
 from __future__ import annotations
 

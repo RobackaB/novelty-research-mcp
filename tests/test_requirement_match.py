@@ -1,4 +1,4 @@
-"""Testy zdieľaného porovnávania požiadaviek s textom dôkazu."""
+"""Tests of the shared matching of requirements against evidence text."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def test_requirement_match_strength_levels():
 
 
 def test_requirement_match_strength_stemming_variants():
-    # "unlocked" v texte má pokryť požiadavku "unlocking".
+    # "unlocked" in the text must cover the "unlocking" requirement.
     assert requirement_match_strength(["unlocking"], "The door is unlocked remotely") == "full"
 
 

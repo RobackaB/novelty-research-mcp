@@ -1,4 +1,4 @@
-"""Testy vylepšení vyhľadávania: expanzia dotazov, XHR provider, arXiv, korohorácia."""
+"""Tests of the search improvements: query expansion, XHR provider, arXiv, corroboration."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def test_envelope_contains_synonyms_and_expanded_variants():
     envelope = rs._build_query_envelope(
         "smart door lock with a mobile application using machine learning"
     )
-    assert envelope["synonyms"], "synonyms pole už nemá byť prázdne"
+    assert envelope["synonyms"], "the synonyms field must no longer be empty"
     patent_variants = envelope["query_variants"]["patent"]
     assert any("ml" in variant.lower().split() or "intelligent" in variant.lower() for variant in patent_variants), patent_variants
 
@@ -109,7 +109,7 @@ async def test_google_patents_xhr_empty_payload():
     assert await _google_patents_xhr_search(client, "query", 10) == []
 
 
-# --- arXiv paralelný provider -----------------------------------------------
+# --- arXiv parallel provider --------------------------------------------------
 
 async def test_arxiv_blocks_adapter(monkeypatch):
     arxiv_output = (
@@ -138,7 +138,7 @@ async def test_arxiv_blocks_adapter(monkeypatch):
     assert score > 0
     assert "SOURCE: ArXiv" in block
     assert "Local rerank score" in block
-    # Blok musí byť kompatibilný s deduplikáciou podľa názvu.
+    # The block must be compatible with title-based deduplication.
     _doi, title_key = ps._publication_dedupe_keys(block)
     assert title_key == "smart lock security with mobile applications"
 
@@ -151,7 +151,7 @@ async def test_arxiv_blocks_adapter_failure_is_empty(monkeypatch):
     assert await ps._arxiv_blocks_safe(["q"], "q", 5) == []
 
 
-# --- Query-focused výňatky abstraktov ---------------------------------------
+# --- Query-focused abstract excerpts ------------------------------------------
 
 def test_relevant_abstract_excerpt_picks_matching_sentence():
     abstract = (
@@ -171,7 +171,7 @@ def test_relevant_abstract_excerpt_short_abstract_untouched():
     assert _relevant_abstract_excerpt(abstract, "locks", max_words=60) == abstract
 
 
-# --- Kros-zdrojová korohorácia ----------------------------------------------
+# --- Cross-source corroboration -----------------------------------------------
 
 def _source(source_type, hits):
     return {
@@ -222,7 +222,7 @@ def _corroborated_pack():
 def test_cross_source_corroboration_detects_same_patent_family():
     pack = _corroborated_pack()
     labels = _mark_cross_source_corroboration(pack)
-    assert labels, "patent a web zdieľajú rovnaké patentové číslo (bez kind kódu)"
+    assert labels, "patent and web share the same patent number (without the kind code)"
     assert any("patent" in label and "web" in label for label in labels)
     assert pack["patents"]["hits"][0].get("cross_source_corroborated") is True
     assert pack["web"]["hits"][0].get("cross_source_corroborated") is True

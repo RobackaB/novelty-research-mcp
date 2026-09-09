@@ -1,4 +1,4 @@
-"""Testy opráv vyplývajúcich z hĺbkovej analýzy reálneho behu."""
+"""Tests of the fixes that came out of deep analysis of a real run."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import tools.research_session as rs
 import tools.web_evidence_pack as wep
 
 
-# --- Priorita 2: Jina API kľúč ------------------------------------------------
+# --- Priority 2: Jina API key -------------------------------------------------
 
 def test_jina_headers_without_key(monkeypatch):
     monkeypatch.delenv("JINA_API_KEY", raising=False)
@@ -52,7 +52,7 @@ async def test_fetch_via_jina_sends_auth_header(monkeypatch):
     assert captured["headers"]["Authorization"] == "Bearer secret-key"
 
 
-# --- Priorita 3: web_evidence_pack chybové hlásenia ---------------------------
+# --- Priority 3: web_evidence_pack error messages ----------------------------
 
 def test_errors_from_markers_parses_error_lines():
     search_output = (
@@ -82,13 +82,13 @@ async def test_web_evidence_pack_surfaces_real_error_reason(monkeypatch):
 
     monkeypatch.setattr(wep, "web_search", fake_search)
     payload = json.loads(await wep.web_evidence_pack("query with no candidates parsed"))
-    assert payload["errors"], "reálny dôvod chyby má byť v errors, nie len generická hláška"
+    assert payload["errors"], "the real cause must be in errors, not just a generic message"
     assert payload["errors"][0]["type"] == "google_custom_search_web_search_failure"
     assert any("google_custom_search_web_search_failure" in w for w in payload["warnings"])
     assert not any(w == "Search provider reported partial errors; see server logs or raw web_search output." for w in payload["warnings"])
 
 
-# --- Priorita 4: dôležitosťou vedený výber variantu dotazu --------------------
+# --- Priority 4: importance-driven query variant selection -------------------
 
 def test_query_variants_keep_function_atoms_over_positional_slicing():
     atomic = [
@@ -100,13 +100,13 @@ def test_query_variants_keep_function_atoms_over_positional_slicing():
     ]
     variants = rs._query_variants_from_atoms("original query text", ["term"], atomic)
     tail_variant = variants[-1]
-    assert "real time" in tail_variant, "funkčný prvok sa nesmie stratiť pri skracovaní variantu"
+    assert "real time" in tail_variant, "the function element must not be lost when the variant is shortened"
     assert "notifies administrator" in tail_variant
 
 
 def test_query_variants_low_priority_category_trimmed_first():
-    # Veľa object_or_form_factor atómov + jeden function atóm; pri orezaní na
-    # limit tokenov musí function atóm prežiť dlhšie ako generické atómy.
+    # Many object_or_form_factor atoms plus one function atom. When trimming to
+    # the token limit, the function atom must survive longer than generic ones.
     atomic = [{"category": "object_or_form_factor", "label": "core subject device"}]
     atomic += [
         {"category": "object_or_form_factor", "label": f"generic filler element number {i} words here"}
@@ -124,7 +124,7 @@ def test_query_variants_from_atoms_no_labels_falls_back():
     assert len(variants) >= 1
 
 
-# --- Priorita 6: orezanie warnings v ACK a zjednotenie retry akcií -----------
+# --- Priority 6: truncating ACK warnings and unifying retry actions ----------
 
 def test_truncated_warnings_keeps_all_items_but_shortens_text():
     long_text = "CLAIM1: " + ("word " * 200)

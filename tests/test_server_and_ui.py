@@ -1,4 +1,4 @@
-"""Testy registrácie MCP nástrojov a terminálového banneru."""
+"""Tests of MCP tool registration and the terminal banner."""
 
 from __future__ import annotations
 

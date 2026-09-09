@@ -1,4 +1,4 @@
-"""Testy čistenia textu výstupu podľa defektov z reálneho reportu."""
+"""Tests of output text cleaning, driven by defects found in a real report."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def test_unescape_handles_double_encoding():
     assert unescape_entities("") == ""
 
 
-# --- Zopakované výrazy -------------------------------------------------------
+# --- Repeated phrases ---------------------------------------------------------
 
 def test_collapse_pipe_repeat_from_page_title():
     assert collapse_repeats("Rootly | Rootly Anomaly Scoring Engine") == "Rootly Anomaly Scoring Engine"
@@ -43,7 +43,7 @@ def test_collapse_leaves_normal_text_intact():
     assert collapse_repeats("anomaly detection in application logs") == "anomaly detection in application logs"
 
 
-# --- Navigačný a metadátový balast -------------------------------------------
+# --- Navigational and metadata clutter ----------------------------------------
 
 def test_strip_repository_metadata():
     text = "logmind AI-powered log anomaly detection CLI - Stars: 0 - Forks: 0 - Watchers: 3"
@@ -71,7 +71,7 @@ def test_strip_boilerplate_keeps_technical_sentence():
     assert strip_boilerplate(text) == text.strip(" .,;:|-–—")
 
 
-# --- Duplicitný názov na začiatku súhrnu -------------------------------------
+# --- Duplicated title at the start of a summary -------------------------------
 
 def test_strip_leading_title_removes_duplicate():
     title = "Detecting Anomalies in Application Logs"
@@ -84,7 +84,7 @@ def test_strip_leading_title_ignores_short_or_absent_title():
     assert strip_leading_title("Some summary text", "Different Title Here") == "Some summary text"
 
 
-# --- Skutočné reťazce z reálneho reportu -------------------------------------
+# --- Actual strings taken from a real report ----------------------------------
 
 def test_real_report_github_entry_is_cleaned():
     title = _sanitize_display_text(
@@ -118,7 +118,7 @@ def test_real_report_rootly_entry_is_cleaned():
     assert not summary.startswith("Rootly Anomaly Scoring Engine")
 
 
-# --- Súhrn bez dôkaznej hodnoty ----------------------------------------------
+# --- Summaries carrying no evidential value -----------------------------------
 
 def test_summary_without_query_terms_is_dropped():
     query_tokens = tokens("anomaly detection in application logs")
@@ -158,6 +158,6 @@ def test_report_omits_meaningless_summary_but_keeps_hit():
     answer = build_user_answer_payload(
         merged_pack=pack, original_query="anomaly detection in application logs"
     )["user_answer"]
-    assert "Rootly Anomaly Scoring Engine" in answer, "nález sa má naďalej zobraziť"
-    assert "Top People Making the World" not in answer, "bezobsažný súhrn sa nemá zobraziť"
+    assert "Rootly Anomaly Scoring Engine" in answer, "the hit must still be displayed"
+    assert "Top People Making the World" not in answer, "a contentless summary must not be displayed"
     assert "https://example.com/rootly" in answer

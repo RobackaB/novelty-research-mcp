@@ -1,4 +1,4 @@
-"""Testy tvorby finálnej debug odpovede."""
+"""Tests of building the final debug answer."""
 
 from __future__ import annotations
 

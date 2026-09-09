@@ -1,4 +1,4 @@
-"""Testy PDF-first načítania patentov cez oficiálne Google storage PDF."""
+"""Tests of PDF-first patent fetching through the official Google storage PDF."""
 
 from __future__ import annotations
 
@@ -47,14 +47,14 @@ def test_pdf_fields_without_claims_is_abstract_level():
 
 
 def test_pdf_fields_use_sentinels_so_meta_text_never_pollutes_coverage():
-    """Meta-vety o PDF nesmú vstúpiť do výpočtu pokrytia ani do súhrnu."""
+    """Meta sentences about the PDF must enter neither the coverage computation nor the summary."""
     out = pf._pdf_fields("https://x/patent", "https://y.pdf", PDF_TEXT_WITH_CLAIMS, [])
     claim_line = next(l for l in out.splitlines() if l.startswith("CLAIM1:"))
     abstract_line = next(l for l in out.splitlines() if l.startswith("ABSTRACT:"))
-    # Existujúce filtre v patent_evidence_pack vylučujú práve tieto sentinely.
+    # The existing filters in patent_evidence_pack exclude exactly these sentinels.
     assert "No first claim" in claim_line
     assert "No abstract section" in abstract_line
-    # A skutočne sa nedostanú do zobrazovaného súhrnu.
+    # And they genuinely do not reach the displayed summary.
     assert pep._fetch_summary(out) == ""
 
 
@@ -79,7 +79,7 @@ async def test_patent_fetch_prefers_pdf_and_skips_html(monkeypatch):
         pdf_url="https://patentimages.storage.googleapis.com/x/US10831585.pdf",
     )
     assert "EVIDENCE_LEVEL: CLAIM_VERIFIED" in out
-    assert html_called is False, "pri dostupnom PDF sa blokovaná HTML stránka nemá sťahovať"
+    assert html_called is False, "when a PDF is available the blocked HTML page must not be fetched"
 
 
 async def test_patent_fetch_falls_back_to_html_when_pdf_empty(monkeypatch):
@@ -123,7 +123,7 @@ async def test_patent_fetch_falls_back_to_html_when_pdf_raises(monkeypatch):
 
 
 async def test_patent_fetch_rejects_too_short_pdf_text(monkeypatch):
-    """Krátky text (napr. len titulná strana) sa nepovažuje za plný dokument."""
+    """Short text, a cover page for instance, does not count as the full document."""
 
     async def fake_html(url, timeout_ms=60000):
         return "<html><head><title>US3</title></head><body><p>x</p></body></html>", ""
@@ -139,7 +139,7 @@ async def test_patent_fetch_rejects_too_short_pdf_text(monkeypatch):
     assert "PDF_CLAIMS_SECTION" not in out
 
 
-# --- patent_search: zachytenie pdf cesty a metadát ---------------------------
+# --- patent_search: capturing the PDF path and metadata ----------------------
 
 class _FakeResponse:
     def __init__(self, payload):
@@ -203,7 +203,7 @@ def test_non_xhr_providers_default_to_empty_pdf_url():
     assert candidate.assignee == ""
 
 
-# --- evidence pack: pdf_url prechádza a coverage tokeny sa použijú -----------
+# --- evidence pack: pdf_url passes through and coverage tokens are used ------
 
 async def test_evidence_pack_passes_pdf_url_and_uses_coverage_tokens(monkeypatch):
     seen_pdf_urls = []
@@ -255,6 +255,6 @@ async def test_evidence_pack_passes_pdf_url_and_uses_coverage_tokens(monkeypatch
     assert seen_pdf_urls == ["https://patentimages.storage.googleapis.com/x/US10831585.pdf"]
     hit = payload["hits"][0]
     assert hit["evidence_level"] == "claim_verified"
-    # Pokrytie sa počíta z tokenov celého PDF, nie zo snippetu.
+    # Coverage is computed from the whole PDF's tokens, not from the snippet.
     assert hit["claim_coverage"] == 1.0
     assert hit["exact_combination_candidate_found"] is True

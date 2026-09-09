@@ -1,4 +1,4 @@
-"""Testy tvorby používateľskej odpovede."""
+"""Tests of building the user-facing answer."""
 
 from __future__ import annotations
 
@@ -126,7 +126,7 @@ def test_pseudo_atoms_used_when_atomic_missing():
         original_query="smart door lock mobile application",
         query_envelope=envelope,
     )
-    assert payload["critical_requirement_statuses"], "pseudo-atomy majú vyplniť tabuľku pokrytia"
+    assert payload["critical_requirement_statuses"], "pseudo-atoms must populate the coverage table"
     assert "Element-by-element coverage" in payload["user_answer"]
 
 
@@ -139,9 +139,9 @@ def test_pseudo_atoms_builder():
 
 def test_sanitize_summary_drops_tables_and_non_ascii():
     assert _sanitize_summary("| a | b | c |", 100, "en") == ""
-    # Prevažne ne-ASCII text (nad 40 % znakov) sa v anglickom výstupe zahodí.
+    # Predominantly non-ASCII text (over 40% of characters) is dropped from English output.
     assert _sanitize_summary("智能门锁系统分析研究报告 " * 5, 200, "en") == ""
-    # Slovenčina s diakritikou je pod prahom a zostáva zachovaná.
+    # Slovak with diacritics stays below the threshold and is preserved.
     assert _sanitize_summary("čisto slovenský text", 200, "en") == "čisto slovenský text"
     assert _sanitize_summary("plain summary", 100, "en") == "plain summary"
 
@@ -149,7 +149,7 @@ def test_sanitize_summary_drops_tables_and_non_ascii():
 def test_trim_to_words_limits_length():
     text = "\n".join(["word " * 50] * 10)
     trimmed = _trim_to_words(text, 60)
-    assert len(trimmed.split()) <= 61  # +1 pre pripojené "..."
+    assert len(trimmed.split()) <= 61  # +1 for the appended "..."
 
 
 def test_failed_pack_yields_partial_retrieval():

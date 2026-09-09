@@ -1,4 +1,4 @@
-"""Testy kvality patentových výsledkov podľa defektov z reálneho behu."""
+"""Tests of patent result quality, driven by defects found in a real run."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from tools.patent_search import (
     _wipo_snippet,
 )
 
-# Doslovný riadok z výsledkovej tabuľky WIPO PATENTSCOPE zachytený pri reálnom behu.
+# A verbatim row from the WIPO PATENTSCOPE result table, captured during a real run.
 WIPO_ROW = (
     "5. 20150294100 Method, system and computer program for comparing images US - 15.10.2015 "
     "Int.Class G06K 9/00 G PHYSICS 06 COMPUTING; CALCULATING OR COUNTING K GRAPHICAL DATA "
@@ -19,7 +19,7 @@ WIPO_ROW = (
 
 
 def test_wipo_snippet_strips_classification_boilerplate():
-    """Rozpis medzinárodného triedenia spôsoboval falošné zhody s dotazom."""
+    """The international classification listing caused false matches against the query."""
     out = _wipo_snippet(WIPO_ROW)
     assert "recognising patterns" not in out
     assert "COMPUTING" not in out
@@ -45,7 +45,7 @@ def test_wipo_snippet_empty_when_nothing_substantive_remains():
 
 
 def test_wipo_snippet_no_longer_matches_unrelated_query():
-    """Očistený snippet nesmie prejsť ako relevantný k dotazu o logoch."""
+    """A cleaned snippet must not pass as relevant to a query about logs."""
     from tools.relevance import evidence_score
 
     query = "detecting anomalies in application logs machine learning recognise unusual patterns"
@@ -64,7 +64,7 @@ def _candidate(number: str, title: str, snippet: str = "") -> PatentCandidate:
 
 
 def test_low_confidence_mode_drops_zero_score_candidates():
-    """Pri núdzovom režime sa do reportu nesmú dostať úplne nesúvisiace patenty."""
+    """In fallback mode, entirely unrelated patents must not reach the report."""
     query = "detecting anomalies in application logs and notifying an administrator"
     candidates = [
         _candidate("WO1", "ANOMALY DETECTION SYSTEM AND METHOD for application logs"),
@@ -85,10 +85,10 @@ def test_low_confidence_mode_can_return_nothing():
 
 
 def test_domain_anchor_applies_to_the_primary_path_too():
-    """Patent spojený s dotazom len všeobecnou slovnou zásobou nesmie prejsť ani nad prahom.
+    """A patent linked to the query by generic vocabulary alone must not pass, even above the threshold.
 
-    Váženie vzácnosťou termínov to nezachytí, keď sú všetci kandidáti z jednej
-    patentovej rodiny — vtedy majú všetky termíny rovnakú frekvenciu.
+    Term-rarity weighting does not catch this when all candidates come from one
+    patent family, because then every term has the same frequency.
     """
     query = "detecting anomalies in application logs and notifying an administrator"
     family = [
@@ -128,7 +128,7 @@ def test_high_confidence_results_are_unaffected_by_the_floor():
 
 
 def test_same_invention_under_different_numbers_is_deduplicated():
-    """Jedna prihláška sa vracia pod viacerými publikačnými číslami."""
+    """One application comes back under several publication numbers."""
     from tools.patent_search import _dedupe
 
     family = [

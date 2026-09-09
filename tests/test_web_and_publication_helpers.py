@@ -1,4 +1,4 @@
-"""Testy pomocných funkcií webového a publikačného vyhľadávania."""
+"""Tests of the web and publication search helpers."""
 
 from __future__ import annotations
 

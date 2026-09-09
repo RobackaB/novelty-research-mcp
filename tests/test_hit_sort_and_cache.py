@@ -1,4 +1,4 @@
-"""Testy triedenia nálezov a TTL cache."""
+"""Tests of hit ordering and the TTL cache."""
 
 from __future__ import annotations
 

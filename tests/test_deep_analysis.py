@@ -1,4 +1,4 @@
-"""Testy hĺbkovej analýzy zdrojov: PDF dôkazy, atom coverage a exact flag."""
+"""Tests of deep source analysis: PDF evidence, atom coverage and the exact flag."""
 
 from __future__ import annotations
 
@@ -157,7 +157,7 @@ async def test_patent_pack_exact_candidate_from_full_claims(monkeypatch):
         )
     )
     hit = payload["hits"][0]
-    # Claim 1 samotný atomy nepokrýva; plný text nárokov áno.
+    # Claim 1 alone does not cover the atoms; the full claim text does.
     assert hit["claim_coverage"] == 1.0
     assert hit["exact_combination_candidate_found"] is True
 
@@ -227,12 +227,12 @@ async def test_writers_pass_atomic_requirements(temp_db, monkeypatch):
     rs.research_session_understand_query(session_id)
     await rs.web_evidence_to_session(session_id=session_id, query="smart door lock", attempt_no=1)
     atoms = captured.get("atomic_requirements")
-    assert isinstance(atoms, list) and atoms, "writer má odovzdať atomické požiadavky z envelope"
+    assert isinstance(atoms, list) and atoms, "the writer must pass on the atomic requirements from the envelope"
     assert all(isinstance(atom, dict) for atom in atoms)
 
 
 def test_exact_candidate_reaches_verdict_and_checklist(temp_db):
-    """Exact flag z packu sa má preniesť cez SQLite až do checklistu a verdiktu."""
+    """The pack's exact flag must carry through SQLite into the checklist and the verdict."""
     session_id = json.loads(rs.research_session_start("smart lock"))["session_id"]
     pack = {
         "source_type": "web",

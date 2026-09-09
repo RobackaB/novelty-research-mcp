@@ -1,4 +1,4 @@
-"""Testy evidence packov so zastubovanými sieťovými funkciami."""
+"""Tests of the evidence packs with the network functions stubbed out."""
 
 from __future__ import annotations
 
