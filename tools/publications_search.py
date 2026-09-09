@@ -1,4 +1,4 @@
-"""Vyhľadávanie odborných publikácií vo viacerých zdrojoch."""
+"""Searching for scholarly publications across several providers."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ QUERY_FILLER_RE = re.compile(
 
 
 def _relevant_abstract_excerpt(abstract: str, query: str, max_words: int = ABSTRACT_WORD_LIMIT) -> str:
-    """Vyberie z abstraktu vety najrelevantnejšie k dotazu namiesto jeho začiatku."""
+    """Select the abstract sentences most relevant to the query rather than its opening."""
     text = re.sub(r"\s+", " ", abstract or "").strip()
     if not text:
         return ""
@@ -62,7 +62,7 @@ def _relevant_abstract_excerpt(abstract: str, query: str, max_words: int = ABSTR
 
 
 def _publication_failure(reason: str) -> str:
-    """Vytvorí odpoveď pri úplnom zlyhaní publikačného vyhľadávania."""
+    """Build the response for a complete publication search failure."""
     return prepend_markers(
         NormalizedResult(
             status="failed",
@@ -81,7 +81,7 @@ def _publication_failure(reason: str) -> str:
 
 
 def _publication_partial(reason: str, body: str) -> str:
-    """Vytvorí odpoveď pre neúplné publikačné výsledky."""
+    """Build the response for incomplete publication results."""
     return prepend_markers(
         NormalizedResult(
             status="partial_failure",
@@ -95,13 +95,13 @@ def _publication_partial(reason: str, body: str) -> str:
 
 
 def _looks_failed(text: str) -> bool:
-    """Zistí, či text obsahuje známky chyby alebo limitu poskytovateľa."""
+    """Determine whether a text shows signs of a provider error or rate limit."""
     lower = (text or "").lower()
     return any(term in lower for term in FAILURE_TERMS)
 
 
 def _filter_publication_text(query: str, text: str, max_results: int) -> str:
-    """Prefiltruje textové bloky publikácií podľa lokálneho skóre relevancie."""
+    """Filter publication text blocks by their local relevance score."""
     blocks = [block.strip() for block in re.split(r"\n\s*\n", text or "") if block.strip()]
     ranked = [
         (evidence_score(query, block, "PUBLICATION"), block)
@@ -113,7 +113,7 @@ def _filter_publication_text(query: str, text: str, max_results: int) -> str:
 
 
 def _fallback_publication_queries(query: str, max_variants: int = 2) -> list[str]:
-    """Vytvorí jednoduché záložné varianty publikačného dotazu."""
+    """Build simple fallback variants of the publication query."""
     normalized = (query or "").lower()
     compact = re.sub(r"[^a-z0-9+\- ]+", " ", normalized)
     compact = QUERY_FILLER_RE.sub(" ", compact)
@@ -133,7 +133,7 @@ def _fallback_publication_queries(query: str, max_variants: int = 2) -> list[str
 
 
 def _iter_alpha_items(value: object) -> list[dict[str, object]]:
-    """Nájde položky publikácií v rôznych tvaroch AlphaXiv výstupu."""
+    """Locate publication items across the various shapes of AlphaXiv output."""
     if isinstance(value, list):
         items: list[dict[str, object]] = []
         for entry in value:
@@ -152,7 +152,7 @@ def _iter_alpha_items(value: object) -> list[dict[str, object]]:
 
 
 def _alpha_url(item: dict[str, object]) -> str:
-    """Vytiahne URL adresu publikácie z položky AlphaXiv výstupu."""
+    """Extract a publication's URL from an AlphaXiv output item."""
     for key in ("url", "alphaUrl", "alphaXivUrl", "arxivUrl", "pdfUrl"):
         value = item.get(key)
         if isinstance(value, str) and value.startswith("http"):
@@ -166,7 +166,7 @@ def _alpha_url(item: dict[str, object]) -> str:
 
 
 def _format_alpha_item(item: dict[str, object], relevance_query: str) -> tuple[float, str] | None:
-    """Prevedie jednu AlphaXiv položku na skórovaný textový blok."""
+    """Convert one AlphaXiv item into a scored text block."""
     title = str(item.get("title") or item.get("paperTitle") or item.get("name") or "").strip()
     if not title:
         return None
@@ -223,7 +223,7 @@ def _format_alpha_item(item: dict[str, object], relevance_query: str) -> tuple[f
 
 
 def _alpha_text_blocks(output: str, relevance_query: str, max_results: int) -> list[tuple[float, str]]:
-    """Spracuje textový AlphaXiv výstup na skórované bloky publikácií."""
+    """Process textual AlphaXiv output into scored publication blocks."""
     blocks: list[tuple[float, str]] = []
     for raw_block in [block.strip() for block in re.split(r"\n\s*\n", output or "") if block.strip()]:
         title_match = re.search(r"(?:^|\n)\s*(?:[-*]\s*)?(?:title|paper title|publication title)[^:\n]*:\s*\**(.+?)\**\.?\s*(?:\n|$)", raw_block, re.I)
@@ -253,7 +253,7 @@ def _alpha_text_blocks(output: str, relevance_query: str, max_results: int) -> l
 
 
 async def _alpha_search_blocks(search_queries: list[str], relevance_query: str, max_results: int, seen: set[str]) -> list[tuple[float, str]]:
-    """Vyhľadá publikácie cez AlphaXiv MCP server a vráti neduplicitné skórované bloky."""
+    """Search publications through the AlphaXiv MCP server and return deduplicated scored blocks."""
     blocks: list[tuple[float, str]] = []
     for search_query in search_queries:
         items = await alphaxiv_discover_papers(search_query)
@@ -280,7 +280,7 @@ async def _alpha_search_blocks(search_queries: list[str], relevance_query: str, 
 
 
 def _low_confidence_no_results_query(query: str, search_queries: list[str]) -> bool:
-    """Určí, či je záver bez publikačných nálezov málo spoľahlivý."""
+    """Determine whether a no-publication-hits conclusion is low confidence."""
     text = f"{query} {' '.join(search_queries)}".lower()
     terms = re.findall(r"[a-z0-9][a-z0-9-]{2,}", text)
     return (
@@ -290,7 +290,7 @@ def _low_confidence_no_results_query(query: str, search_queries: list[str]) -> b
 
 
 async def _crossref_search(query: str, limit: int) -> list[tuple[str, str, str, str, str]]:
-    """Vyhľadá publikácie v Crossref a vráti základné údaje s abstraktom."""
+    """Search publications in Crossref and return basic fields with the abstract."""
     params = {
         "query": query,
         "rows": min(max(1, limit) * 2, 20),
@@ -326,7 +326,7 @@ async def _crossref_search(query: str, limit: int) -> list[tuple[str, str, str, 
 
 
 def _crossref_block(title: str, authors: str, year: str, abstract: str, doi_url: str, score: float) -> str:
-    """Vytvorí textový blok pre jeden výsledok z Crossref."""
+    """Build the text block for one Crossref result."""
     return "\n".join([
         f"Publication title returned by Crossref: **{title}**.",
         f"Publication year returned by Crossref: {year}.",
@@ -339,7 +339,7 @@ def _crossref_block(title: str, authors: str, year: str, abstract: str, doi_url:
 
 
 def _parse_pubmed_efetch_xml(xml_text: str) -> list[dict[str, str]]:
-    """Načíta XML odpoveď z PubMedu a vytiahne z nej údaje o článkoch."""
+    """Parse a PubMed XML response and extract the article fields from it."""
     import xml.etree.ElementTree as ET
     try:
         root = ET.fromstring(xml_text or "")
@@ -410,7 +410,7 @@ def _pubmed_block(
     pmid: str,
     score: float,
 ) -> str:
-    """Vytvorí textový blok pre jeden výsledok z PubMedu."""
+    """Build the text block for one PubMed result."""
     doi_url = f"https://doi.org/{doi}" if doi else "Not available"
     pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else "Not available"
     return "\n".join(
@@ -428,7 +428,7 @@ def _pubmed_block(
 
 
 async def _pubmed_search_records(query: str, limit: int) -> list[dict[str, str]]:
-    """Vyhľadá publikácie v PubMede a načíta ich detailné XML záznamy."""
+    """Search publications in PubMed and fetch their detailed XML records."""
     headers = {"User-Agent": USER_AGENT}
     api_key = os.getenv("PUBMED_API_KEY", "").strip()
     esearch_params: dict[str, str] = {
@@ -481,7 +481,7 @@ async def _pubmed_blocks(
     max_results: int,
     seen: set[str],
 ) -> list[tuple[float, str]]:
-    """Vyberie relevantné PubMed záznamy a prevedie ich na textové bloky."""
+    """Select the relevant PubMed records and convert them into text blocks."""
     blocks: list[tuple[float, str]] = []
     for search_query in search_queries:
         records = await _pubmed_search_records(search_query, max_results)
@@ -528,7 +528,7 @@ async def _pubmed_blocks(
 async def _pubmed_blocks_safe(
     search_queries: list[str], relevance_query: str, max_results: int
 ) -> list[tuple[float, str]]:
-    """Bezpečne spustí PubMed vyhľadávanie a pri chybe vráti prázdny zoznam."""
+    """Run the PubMed search safely, returning an empty list on error."""
     try:
         return await _pubmed_blocks(search_queries, relevance_query, max_results, set())
     except Exception:
@@ -536,7 +536,7 @@ async def _pubmed_blocks_safe(
 
 
 def _reconstruct_openalex_abstract(inverted: object) -> str:
-    """Zrekonštruuje abstrakt z invertovaného indexu, ktorý vracia OpenAlex."""
+    """Reconstruct an abstract from the inverted index OpenAlex returns."""
     if not isinstance(inverted, dict) or not inverted:
         return ""
     positions: list[tuple[int, str]] = []
@@ -565,7 +565,7 @@ def _openalex_block(
     work_url: str,
     score: float,
 ) -> str:
-    """Vytvorí textový blok pre jeden výsledok z OpenAlex."""
+    """Build the text block for one OpenAlex result."""
     return "\n".join(
         [
             f"Publication title returned by OpenAlex: **{title}**.",
@@ -581,7 +581,7 @@ def _openalex_block(
 
 
 async def _openalex_search(query: str, limit: int) -> list[tuple[str, str, str, str, str, str]]:
-    """Vyhľadá publikácie v OpenAlex a vráti základné údaje s abstraktom."""
+    """Search publications in OpenAlex and return basic fields with the abstract."""
     params = {
         "search": query,
         "per_page": min(max(1, limit) * 2, 25),
@@ -633,7 +633,7 @@ async def _openalex_blocks(
     max_results: int,
     seen: set[str],
 ) -> list[tuple[float, str]]:
-    """Vyberie relevantné OpenAlex záznamy a prevedie ich na textové bloky."""
+    """Select the relevant OpenAlex records and convert them into text blocks."""
     blocks: list[tuple[float, str]] = []
     for search_query in search_queries:
         try:
@@ -664,7 +664,7 @@ async def _openalex_blocks(
 async def _openalex_blocks_safe(
     search_queries: list[str], relevance_query: str, max_results: int
 ) -> list[tuple[float, str]]:
-    """Bezpečne spustí OpenAlex vyhľadávanie a pri chybe vráti prázdny zoznam."""
+    """Run the OpenAlex search safely, returning an empty list on error."""
     try:
         return await _openalex_blocks(search_queries, relevance_query, max_results, set())
     except Exception:
@@ -677,7 +677,7 @@ async def _crossref_blocks(
     max_results: int,
     seen: set[str],
 ) -> list[tuple[float, str]]:
-    """Vyberie relevantné Crossref záznamy a prevedie ich na textové bloky."""
+    """Select the relevant Crossref records and convert them into text blocks."""
     blocks: list[tuple[float, str]] = []
     for search_query in search_queries:
         for title, authors, year, abstract, doi_url in await _crossref_search(search_query, max_results):
@@ -715,23 +715,23 @@ _PROVIDER_QUALITY_MULTIPLIERS = {
 }
 _PROVIDER_SOURCE_RE = re.compile(r"^SOURCE:\s*(.+?)\s*$", flags=re.IGNORECASE | re.MULTILINE)
 _PUB_DOMINANCE_RATIO = 0.7
-# Aspoň toľko výsledkov musí druhý prechod ponechať, aby sa prísnejšie
-# doménové filtrovanie nemohlo zvrhnúť na vyprázdnenie celého výsledku.
+# The second pass must keep at least this many results, so that stricter domain
+# filtering cannot degenerate into emptying the result set entirely.
 _IDF_RERANK_MIN_KEPT = 3
 
 
 def _rerank_with_corpus_idf(
     blocks: list[tuple[float, str]], relevance_query: str
 ) -> tuple[list[tuple[float, str]], int]:
-    """Preskóruje zlúčených kandidátov s váhou podľa vzácnosti termínov.
+    """Re-score the merged candidates with weighting by term rarity.
 
-    Jednotliví poskytovatelia filtrujú každý zvlášť a v tej chvíli ešte nie je
-    známe, ktoré termíny dotazu sú v danej množine výsledkov rozlišujúce.
-    Tento druhý prechod prebieha až nad zlúčenou množinou, takže dokument
-    z inej domény, ktorý prešiel len vďaka zdieľanej generickej slovnej
-    zásobe, sa dá spoľahlivejšie odfiltrovať.
+    Each provider filters on its own, and at that point it is not yet known
+    which of the query's terms discriminate within the result set. This second
+    pass runs over the merged set instead, so a document from another domain
+    that passed on shared generic vocabulary alone can be filtered out more
+    reliably.
 
-    Vráti dvojicu (ponechané bloky, počet odfiltrovaných).
+    Returns a pair: the blocks kept, and the number filtered out.
     """
     if len(blocks) < _MIN_CORPUS_FOR_IDF:
         return blocks, 0
@@ -750,15 +750,15 @@ def _rerank_with_corpus_idf(
             rejected.append((new_score, block))
     if len(rescored) >= _IDF_RERANK_MIN_KEPT or not rejected:
         return rescored, len(rejected)
-    # Pri veľmi prísnom výsledku sa doplnia najlepšie zamietnuté, aby sa
-    # nestratilo pokrytie zdroja úplne.
+    # When the outcome is very strict, the best rejected candidates are added
+    # back so that coverage of the source is not lost altogether.
     rejected.sort(key=lambda item: item[0], reverse=True)
     fill = _IDF_RERANK_MIN_KEPT - len(rescored)
     return rescored + rejected[:fill], max(0, len(rejected) - fill)
 
 
 def _extract_block_provider(block: str) -> str:
-    """Vytiahne názov poskytovateľa z textového bloku publikácie."""
+    """Extract the provider name from a publication text block."""
     match = _PROVIDER_SOURCE_RE.search(block or "")
     if not match:
         return ""
@@ -767,7 +767,7 @@ def _extract_block_provider(block: str) -> str:
 
 
 def _publication_dedupe_keys(block: str) -> tuple[str, str]:
-    """Vytvorí kľúče na deduplikáciu podľa DOI alebo názvu."""
+    """Build the deduplication keys by DOI or title."""
     doi_match = _DOI_BLOCK_RE.search(block)
     doi_key = ""
     if doi_match:
@@ -787,7 +787,7 @@ async def _semantic_scholar_blocks(
     relevance_query: str,
     max_results: int,
 ) -> tuple[list[tuple[float, str]], bool, bool]:
-    """Vyhľadá publikácie v Semantic Scholar a vráti zoradené textové bloky."""
+    """Search publications in Semantic Scholar and return ordered text blocks."""
     blocks: list[tuple[float, str]] = []
     seen: set[str] = set()
     errored = False
@@ -849,7 +849,7 @@ async def _semantic_scholar_blocks(
 async def _crossref_blocks_safe(
     search_queries: list[str], relevance_query: str, max_results: int
 ) -> list[tuple[float, str]]:
-    """Bezpečne spustí Crossref vyhľadávanie a pri chybe vráti prázdny zoznam."""
+    """Run the Crossref search safely, returning an empty list on error."""
     try:
         return await _crossref_blocks(search_queries, relevance_query, max_results, set())
     except Exception:
@@ -859,7 +859,7 @@ async def _crossref_blocks_safe(
 async def _alpha_blocks_safe(
     search_queries: list[str], relevance_query: str, max_results: int
 ) -> list[tuple[float, str]]:
-    """Bezpečne spustí AlphaXiv vyhľadávanie a pri chybe vráti prázdny zoznam."""
+    """Run the AlphaXiv search safely, returning an empty list on error."""
     try:
         return await _alpha_search_blocks(search_queries, relevance_query, max_results, set())
     except Exception:
@@ -869,7 +869,7 @@ async def _alpha_blocks_safe(
 async def _arxiv_blocks_safe(
     search_queries: list[str], relevance_query: str, max_results: int
 ) -> list[tuple[float, str]]:
-    """Spustí arXiv ako paralelného providera a vráti skórované bloky publikácií."""
+    """Run arXiv as a parallel provider and return scored publication blocks."""
     try:
         blocks: list[tuple[float, str]] = []
         seen: set[str] = set()
@@ -903,7 +903,7 @@ async def _arxiv_blocks_safe(
 async def publications_search(
     query: Any, max_results: int = 5, english_query: str = ""
 ) -> str:
-    """Vyhľadá odborné publikácie vo viacerých dostupných zdrojoch."""
+    """Search for scholarly publications across the available providers."""
     from .query_normalize import coerce_query_input
     if not isinstance(query, str):
         query = coerce_query_input(query)
@@ -994,7 +994,7 @@ async def publications_search(
         merged, idf_dropped = _rerank_with_corpus_idf(merged, relevance_query)
 
         def _sort_score(item: tuple[float, str]) -> float:
-            """Upraví skóre výsledku podľa kvality poskytovateľa."""
+            """Adjust a result's score according to provider quality."""
             score, block = item
             provider = _extract_block_provider(block)
             multiplier = _PROVIDER_QUALITY_MULTIPLIERS.get(provider, 1.0)

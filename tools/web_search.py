@@ -1,4 +1,4 @@
-"""Vyhľadávanie a načítanie webových stránok."""
+"""Searching for and fetching web pages."""
 
 from __future__ import annotations
 
@@ -72,10 +72,10 @@ TRACKING_QUERY_PREFIXES = ("utm_",)
 TRACKING_QUERY_KEYS = {"fbclid", "gclid", "igshid", "mc_cid", "mc_eid", "srsltid"}
 
 class WebSearchProviderUnavailable(RuntimeError):
-    """Výnimka pre webového poskytovateľa, ktorý nie je dostupný alebo nakonfigurovaný."""
+    """Raised when a web provider is unavailable or not configured."""
 
 def _rank_domain(url: str) -> tuple[int, str]:
-    """Vráti prioritu domény pri radení webových výsledkov."""
+    """Return a domain's priority when ordering web results."""
     domain = urlsplit(url).netloc.lower()
     if domain in PATENT_EVIDENCE_DOMAINS or domain.endswith(".patents.google.com"):
         return (3, domain)
@@ -87,7 +87,7 @@ def _rank_domain(url: str) -> tuple[int, str]:
 
 
 def _extract_main_text(html: str) -> tuple[str, str]:
-    """Získa hlavný text a najlepší dostupný dátum z HTML stránky."""
+    """Extract the main text and the best available date from an HTML page."""
     soup = BeautifulSoup(html, "lxml")
     for node in soup.select("nav, header, footer, aside, script, style, form, noscript, .ads, .cookie-banner"):
         node.decompose()
@@ -109,7 +109,7 @@ def _extract_main_text(html: str) -> tuple[str, str]:
     return date or "Unknown", "\n".join(lines)
 
 def _query_terms(query: str) -> set[str]:
-    """Získa významové slová z dotazu pre webové filtrovanie."""
+    """Extract the meaningful words of a query for web filtering."""
     stopwords = {
         "about",
         "after",
@@ -135,7 +135,7 @@ def _compact_content(
     max_words: int = FETCH_CONTENT_WORDS,
     max_sentences: int = 8,
 ) -> str:
-    """Skráti obsah stránky na vety najrelevantnejšie k dotazu."""
+    """Reduce a page's content to the sentences most relevant to the query."""
     text = re.sub(r"\s+", " ", text or "").strip()
     if not text:
         return ""
@@ -157,7 +157,7 @@ def _compact_content(
     return trim_words(excerpt, max_words)
 
 def _clean_jina_content(text: str) -> str:
-    """Odstráni navigačný šum z textu získaného cez Jina reader."""
+    """Strip navigational noise from text retrieved through the Jina reader."""
     lines = []
     for raw in (text or "").splitlines():
         line = re.sub(r"\s+", " ", raw).strip()
@@ -171,22 +171,22 @@ def _clean_jina_content(text: str) -> str:
     return "\n".join(lines)
 
 def _is_error_document(text: str) -> bool:
-    """Zistí, či načítaný text vyzerá ako chybová stránka."""
+    """Determine whether fetched text looks like an error page."""
     compact = re.sub(r"\s+", " ", (text or "").strip()).lower()
     if not compact:
         return False
     return bool(re.search(r"\b(?:403 forbidden|404 not found|target url returned error 403|target url returned error 404)\b", compact))
 
 def _has_meaningful_content(text: str) -> bool:
-    """Overí, či text obsahuje aspoň minimálny počet slov."""
+    """Check whether a text contains at least the minimum word count."""
     return len((text or "").split()) >= MIN_EXTRACTED_WORDS
 
 def _is_access_limited(text: str) -> bool:
-    """Zistí, či stránka naznačuje captcha alebo blokovanie prístupu."""
+    """Determine whether a page indicates a captcha or blocked access."""
     return bool(re.search(r"captcha|access denied|forbidden|temporarily blocked|automated queries", text or "", re.I))
 
 def _is_low_value_url(url: str) -> bool:
-    """Zistí, či adresa smeruje na vyhľadávaciu alebo málo užitočnú stránku."""
+    """Determine whether a URL points to a search page or one of little value."""
     parsed = urlsplit(url)
     domain = parsed.netloc.lower()
     path = parsed.path.lower()
@@ -207,7 +207,7 @@ def _is_low_value_url(url: str) -> bool:
     return False
 
 def _canonical_source_url(url: str) -> str:
-    """Odstráni sledovacie parametre dotazu zo zdrojovej URL adresy."""
+    """Strip tracking query parameters from a source URL."""
     parsed = urlsplit(url.strip().rstrip(".,;"))
     filtered_query = [
         (key, value)
@@ -224,7 +224,7 @@ def _canonical_source_url(url: str) -> str:
     ))
 
 def _query_overlap_match(query: str, text: str) -> bool:
-    """Overí, či text obsahuje dostatok výrazov z dotazu."""
+    """Check whether a text contains enough of the query's terms."""
     query_tokens = tokens(query)
     text_tokens = tokens(text)
     if not query_tokens or not text_tokens:
@@ -234,19 +234,19 @@ def _query_overlap_match(query: str, text: str) -> bool:
     return len(overlap) >= required
 
 def _web_rerank_score(query: str, title: str, snippet: str) -> float:
-    """Vypočíta lokálne skóre webového výsledku."""
+    """Compute the local score of a web result."""
     block = f"{title}\n{snippet}"
     return evidence_score(query, block, "WEB")
 
 def _passes_web_rerank(query: str, title: str, snippet: str, min_score: float = MIN_WEB_RERANK_SCORE) -> bool:
-    """Overí, či webový výsledok spĺňa internú hranicu relevancie."""
+    """Check whether a web result meets the internal relevance threshold."""
     block = f"{title}\n{snippet}"
     if not _query_overlap_match(query, block):
         return False
     return _web_rerank_score(query, title, snippet) >= min_score
 
 def _format_fetch_result(url: str, date: str, content: str, status: str, query: str = "") -> str:
-    """Vytvorí štandardný textový výstup pre úspešné načítanie webovej stránky."""
+    """Build the standard text output for a successful web page fetch."""
     compact = _compact_content(content, query=query)
     if not _has_meaningful_content(compact):
         return _unsupported_fetch("No meaningful text content was extracted from the page within the fetch budget.", url)
@@ -266,8 +266,9 @@ def _format_fetch_result(url: str, date: str, content: str, status: str, query: 
     if analysis and analysis != compact:
         lines.append(f"ANALYSIS: {analysis}")
     cleaned = clean_output("\n".join(lines))
-    # Tokeny celej stránky sa pridávajú až po clean_output, aby ich filter
-    # riadkov neodstránil; slúžia výhradne na výpočet pokrytia prvkov dotazu.
+    # The whole-page tokens are appended only after clean_output, so its line
+    # filter cannot strip them. They serve purely to compute requirement
+    # coverage.
     token_line = unique_coverage_tokens(content)
     if token_line:
         cleaned += f"\nCOVERAGE_TOKENS: {token_line}"
@@ -295,7 +296,7 @@ _MDPI_URL_RE = re.compile(
 )
 
 def _mdpi_url_to_doi(url: str) -> str:
-    """Pokúsi sa previesť URL adresu vedeckého článku na DOI."""
+    """Attempt to convert a scientific article URL into a DOI."""
     match = _MDPI_URL_RE.search(url or "")
     if not match:
         return ""
@@ -308,7 +309,7 @@ def _mdpi_url_to_doi(url: str) -> str:
     return f"10.3390/{code}{vol:02d}{issue:02d}{article:04d}"
 
 async def _crossref_metadata_fallback(doi: str, timeout_ms: int) -> str:
-    """Získa názov a abstrakt z Crossref podľa DOI ako záložný zdroj."""
+    """Fetch the title and abstract from Crossref by DOI as a fallback source."""
     if not doi:
         return ""
     timeout_s = max(3.0, min(8.0, timeout_ms / 2000))
@@ -332,7 +333,7 @@ async def _crossref_metadata_fallback(doi: str, timeout_ms: int) -> str:
     return f"{title}\n\n{abstract}".strip()
 
 async def _wayback_snapshot_text(url: str, timeout_ms: int) -> str:
-    """Pokúsi sa načítať text stránky z najbližšej dostupnej archivovanej snímky."""
+    """Attempt to read a page's text from the nearest available archived snapshot."""
     avail_timeout = max(2.0, min(5.0, timeout_ms / 4000))
     snapshot_url = ""
     try:
@@ -378,7 +379,7 @@ async def _wayback_snapshot_text(url: str, timeout_ms: int) -> str:
         return ""
 
 async def _fetch_with_budget(url: str, timeout_ms: int, query: str = "") -> str:
-    """Načíta webovú stránku viacerými záložnými spôsobmi v rámci časového limitu."""
+    """Fetch a web page through several fallback methods within a time budget."""
     if _is_low_value_url(url):
         return _unsupported_fetch("URL is a low-value search or listing page and was not fetched.", url)
     html = ""
@@ -448,7 +449,7 @@ async def _fetch_with_budget(url: str, timeout_ms: int, query: str = "") -> str:
     return _unsupported_fetch(fail_reason, url)
 
 def _google_cse_credentials() -> tuple[str, str]:
-    """Načíta prihlasovacie údaje pre Google Custom Search z premenných prostredia."""
+    """Read the Google Custom Search credentials from environment variables."""
     api_key = (
         os.getenv("GOOGLE_CSE_API_KEY")
         or os.getenv("GOOGLE_CUSTOM_SEARCH_API_KEY")
@@ -470,13 +471,13 @@ def _google_cse_credentials() -> tuple[str, str]:
     return api_key, search_engine_id
 
 def _extract_snippet(value: object) -> str:
-    """Zjednotí úryvok výsledku vyhľadávania na čistý text."""
+    """Normalise a search result snippet into clean text."""
     if isinstance(value, str) and value.strip():
         return re.sub(r"\s+", " ", value).strip()
     return "No snippet was returned."
 
 def _keep_web_result(url: str, query: str) -> bool:
-    """Rozhodne, či sa webový výsledok môže ponechať na ďalšie spracovanie."""
+    """Decide whether a web result may be kept for further processing."""
     domain = urlsplit(url).netloc.lower()
     if not domain:
         return False
@@ -489,13 +490,13 @@ def _keep_web_result(url: str, query: str) -> bool:
     return True
 
 def _raise_for_search_status(response: httpx.Response, provider_name: str) -> None:
-    """Vyhodí chybu pri neúspešnej alebo neúplnej odpovedi vyhľadávača."""
+    """Raise an error on a failed or incomplete search engine response."""
     if response.status_code == 202:
         raise RuntimeError(f"{provider_name} returned 202 Accepted; search retrieval is incomplete.")
     response.raise_for_status()
 
 async def _google_cse_query(client: httpx.AsyncClient, query: str, limit: int) -> list[tuple[str, str, str]]:
-    """Vyhľadá webové výsledky cez Google Custom Search."""
+    """Search for web results through Google Custom Search."""
     api_key, search_engine_id = _google_cse_credentials()
     response = await client.get(
         "https://www.googleapis.com/customsearch/v1",
@@ -523,7 +524,7 @@ async def _google_cse_query(client: httpx.AsyncClient, query: str, limit: int) -
     return results
 
 async def _tavily_web_query(client: httpx.AsyncClient, query: str, limit: int) -> list[tuple[str, str, str]]:
-    """Vyhľadá webové výsledky cez Tavily."""
+    """Search for web results through Tavily."""
     api_key = os.getenv("TAVILY_API_KEY")
     if not api_key:
         raise WebSearchProviderUnavailable("Tavily is not configured; set TAVILY_API_KEY.")
@@ -555,7 +556,7 @@ async def _tavily_web_query(client: httpx.AsyncClient, query: str, limit: int) -
     return results
 
 async def _exa_web_query(client: httpx.AsyncClient, query: str, limit: int) -> list[tuple[str, str, str]]:
-    """Vyhľadá webové výsledky cez Exa."""
+    """Search for web results through Exa."""
     api_key = os.getenv("EXA_API_KEY")
     if not api_key:
         raise WebSearchProviderUnavailable("Exa is not configured; set EXA_API_KEY.")
@@ -592,7 +593,7 @@ SEARCH_PROVIDERS: tuple[tuple[str, SearchProvider], ...] = (
 )
 
 def _looks_like_binary(text: str) -> bool:
-    """Zistí, či načítaný obsah vyzerá ako binárny alebo poškodený text."""
+    """Determine whether fetched content looks like binary or corrupted text."""
     sample = text[:2000]
     if not sample:
         return False
@@ -601,14 +602,14 @@ def _looks_like_binary(text: str) -> bool:
     return (controls + replacement) / max(len(sample), 1) > 0.02
 
 def _canonical_fetch_url(url: str) -> str:
-    """Prevedie niektoré priame súborové odkazy na vhodnejšiu stránku zdroja."""
+    """Convert certain direct file links into a more suitable source page."""
     match = re.search(r"https://patents\.google\.com/patent/([A-Z]{2}\d+[A-Z0-9]*)\.pdf\b", url, flags=re.IGNORECASE)
     if match:
         return f"https://patents.google.com/patent/{match.group(1).upper()}/en"
     return url
 
 def _unsupported_fetch(reason: str, url: str) -> str:
-    """Vytvorí štandardný chybový výstup pre nepodporené načítanie stránky."""
+    """Build the standard error output for an unsupported page fetch."""
     return "\n".join([
         "TOOL_ERROR: web_fetch",
         f"REASON: {reason}",
@@ -618,7 +619,7 @@ def _unsupported_fetch(reason: str, url: str) -> str:
     ])
 
 async def web_search(query: Any, max_results: int = 5) -> str:
-    """Vyhľadá webové výsledky a vráti očistené záznamy."""
+    """Search for web results and return cleaned records."""
     try:
         from .query_normalize import coerce_query_input
         if not isinstance(query, str):
@@ -648,7 +649,7 @@ async def web_search(query: Any, max_results: int = 5) -> str:
         async def _run_web_provider_variant(
             provider_name: str, provider: SearchProvider, variant: str, client: httpx.AsyncClient,
         ) -> tuple[str, str, str, object]:
-            """Spustí jedného webového poskytovateľa pre jeden variant dotazu."""
+            """Run one web provider for one query variant."""
             try:
                 results = await provider(client, variant, max_provider_results)
                 return ("ok", provider_name, variant, results)
@@ -703,9 +704,9 @@ async def web_search(query: Any, max_results: int = 5) -> str:
                     provider_notes.append(f"{provider_name} unavailable: {slot['unavailable_excs'][0]}")
 
         if merged_results:
-            # Druhý prechod nad zlúčenou množinou: až tu je známe, ktoré termíny
-            # dotazu sú v danej sade výsledkov rozlišujúce a ktoré zdieľajú
-            # všetky (a teda nenesú informáciu).
+            # A second pass over the merged set: only here is it known which of
+            # the query's terms discriminate within this particular result set
+            # and which are shared by all of them, and so carry no information.
             corpus_idf = build_corpus_idf(
                 [f"{title}\n{snippet}" for _u, title, snippet, _s in merged_results.values()]
             )
@@ -810,7 +811,7 @@ async def web_search(query: Any, max_results: int = 5) -> str:
         return format_error("web_search", str(exc))
 
 async def web_fetch(url: str, timeout_ms: int = FETCH_TOTAL_TIMEOUT_MS, query: str = "") -> str:
-    """Načíta webovú stránku a vráti očistený textový obsah."""
+    """Fetch a web page and return its cleaned text content."""
     try:
         url = _canonical_fetch_url(url)
         budget_ms = max(3000, min(timeout_ms, FETCH_TOTAL_TIMEOUT_MS))
