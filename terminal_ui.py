@@ -1,4 +1,4 @@
-"""Jednoduché terminálové UI bez externých závislostí pre HTTP MCP launcher."""
+"""A simple dependency-free terminal UI for the HTTP MCP launcher."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ KEYS = [
 
 
 def _enable_windows_ansi() -> None:
-    """Povolí ANSI farby vo Windows termináli, ak je to možné."""
+    """Enable ANSI colours in the Windows terminal where possible."""
     if os.name != "nt":
         return
     try:
@@ -46,37 +46,37 @@ def _enable_windows_ansi() -> None:
 
 
 def _color_enabled() -> bool:
-    """Zistí, či má banner používať ANSI farby."""
+    """Determine whether the banner should use ANSI colours."""
     if os.getenv("NO_COLOR") or os.getenv("MCP_PLAIN_UI"):
         return False
     return bool(sys.stdout.isatty() or os.name == "nt") and os.getenv("TERM", "") != "dumb"
 
 
 def _c(text: str, code: str, enabled: bool) -> str:
-    """Obalí text ANSI farbou, ak sú farby povolené."""
+    """Wrap text in an ANSI colour when colours are enabled."""
     return f"\033[{code}m{text}\033[0m" if enabled else text
 
 
 def _status(value: str | None, color: bool) -> str:
-    """Vráti textový stav konfigurácie premenného kľúča."""
+    """Return the textual configuration status of an environment key."""
     if value:
         return _c("configured", "32;1", color)
     return _c("missing", "33;1", color)
 
 
 def _env_line(path: Path, color: bool) -> str:
-    """Vytvorí riadok s informáciou, či env súbor existuje."""
+    """Build the line reporting whether an env file exists."""
     marker = _c("found", "32", color) if path.exists() else _c("missing", "33", color)
     return f"{marker}  {path}"
 
 
 def _wrap_rows(rows: Iterable[str], indent: str = "  ") -> str:
-    """Odsadí viacero riadkov banneru rovnakým prefixom."""
+    """Indent several banner lines with the same prefix."""
     return "\n".join(f"{indent}{row}" for row in rows)
 
 
 def startup_banner(host: str, port: int, path: str) -> str:
-    """Vráti startup banner bez priameho vytlačenia, čo je užitočné pre testy."""
+    """Return the startup banner without printing it, which is useful for tests."""
     _enable_windows_ansi()
     color = _color_enabled()
     project_dir = Path(__file__).resolve().parent
@@ -121,7 +121,7 @@ def startup_banner(host: str, port: int, path: str) -> str:
 
 
 def print_startup_banner(host: str, port: int, path: str) -> None:
-    """Vytlačí HTTP launcher banner, ak nie je vypnutý cez env premennú."""
+    """Print the HTTP launcher banner unless it is disabled by an environment variable."""
     if os.getenv("MCP_NO_UI"):
         return
     print(startup_banner(host, port, path), flush=True)
