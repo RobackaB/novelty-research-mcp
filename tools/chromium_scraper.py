@@ -1,4 +1,4 @@
-"""Pomocné funkcie na načítanie webových stránok cez Playwright."""
+"""Helpers for fetching web pages through Playwright."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ from .output_cleaner import USER_AGENT
 
 try:
     from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-except ImportError:  # Playwright je voliteľný; fallback trieda drží rovnaké rozhranie.
+except ImportError:  # Playwright is optional; the fallback class keeps the same interface.
     class PlaywrightTimeoutError(Exception):
-        """Náhradná výnimka, keď Playwright nie je nainštalovaný."""
+        """Substitute exception used when Playwright is not installed."""
 
 
 async def fetch_page_html_and_text(
@@ -17,7 +17,7 @@ async def fetch_page_html_and_text(
     wait_until: str = "networkidle",
     settle_ms: int = 0,
 ) -> tuple[str, str]:
-    """Načíta stránku v prehliadači bez grafického rozhrania a vráti jej HTML aj text."""
+    """Load a page in a headless browser and return both its HTML and its text."""
     try:
         from playwright.async_api import async_playwright
     except ImportError as exc:
@@ -42,7 +42,7 @@ async def fetch_page_html_and_text(
         page = await context.new_page()
 
         async def handle_route(route) -> None:
-            """Preskočí obrázky, font a médiá, aby sa stránka načítala rýchlejšie."""
+            """Skip images, fonts and media so the page loads faster."""
             if route.request.resource_type in {"image", "font", "media"}:
                 await route.abort()
                 return
@@ -60,7 +60,7 @@ async def fetch_page_html_and_text(
 
 
 async def fetch_page_html(url: str, timeout_ms: int = 60000) -> str:
-    """Načíta stránku a vráti iba jej HTML obsah."""
+    """Load a page and return only its HTML content."""
     html, _ = await fetch_page_html_and_text(url, timeout_ms=timeout_ms)
     return html
 

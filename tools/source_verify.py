@@ -1,4 +1,4 @@
-"""Overovanie dostupnosti URL adries nájdených zdrojov."""
+"""Verifying that the URLs of retrieved sources are reachable."""
 
 from __future__ import annotations
 
@@ -18,12 +18,12 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _looks_like_error_url(url: str) -> bool:
-    """Zistí, či finálna URL adresa vyzerá ako chybová stránka."""
+    """Determine whether the final URL looks like an error page."""
     return bool(re.search(r"(?:^|/)(?:error)?404(?:\.|/|$)|not[-_]?found", url or "", flags=re.IGNORECASE))
 
 
 async def _verify_one(client: httpx.AsyncClient, url: str) -> str:
-    """Overí jednu URL adresu cez HTTP a vráti textový stav."""
+    """Verify a single URL over HTTP and return its status as text."""
     try:
         response = await client.head(url)
         if response.status_code in {403, 405} or response.status_code >= 500:
@@ -40,7 +40,7 @@ async def _verify_one(client: httpx.AsyncClient, url: str) -> str:
 
 
 def _url_text(urls: str | list[str] | tuple[str, ...] | Any) -> str:
-    """Prevedie vstup s URL adresami na jeden text."""
+    """Convert a URL input into a single text."""
     if isinstance(urls, str):
         return urls
     if isinstance(urls, (list, tuple)):
@@ -49,7 +49,7 @@ def _url_text(urls: str | list[str] | tuple[str, ...] | Any) -> str:
 
 
 async def verify_sources(urls: str | list[str], max_urls: int = 20) -> str:
-    """Overí, či sú zadané URL adresy dostupné."""
+    """Verify whether the given URLs are reachable."""
     started = time.perf_counter()
     try:
         url_text = _url_text(urls)
