@@ -1,4 +1,4 @@
-"""Pomocné vyhľadávanie odborných článkov v databáze arXiv."""
+"""Supplementary search for scholarly articles in the arXiv database."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from .result_contract import NormalizedResult, prepend_markers
 
 
 def _run_search(query: str, max_results: int) -> list[arxiv.Result]:
-    """Vykoná samotné arXiv vyhľadanie a vráti surové záznamy článkov."""
+    """Perform the arXiv search itself and return the raw article records."""
     search = arxiv.Search(
         query=query,
         max_results=max_results,
@@ -23,7 +23,7 @@ def _run_search(query: str, max_results: int) -> list[arxiv.Result]:
 
 
 async def arxiv_search(query: str, max_results: int = 5) -> str:
-    """Vyhľadá články v arXiv a vráti stručné zhrnutia výsledkov."""
+    """Search arXiv for articles and return brief summaries of the results."""
     try:
         results = await asyncio.to_thread(_run_search, query.strip(), max(1, min(max_results, 20)))
         if not results:

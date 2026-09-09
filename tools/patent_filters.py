@@ -1,4 +1,4 @@
-"""Pomocné funkcie na rozpoznanie patentových výsledkov."""
+"""Helpers for recognising patent results."""
 
 from __future__ import annotations
 
@@ -11,20 +11,20 @@ PATENT_NUMBER_RE = re.compile(r"\b((?:US|EP|WO|CN|JP|KR)\d{4,}[A-Z0-9]*)\b", re.
 
 
 def extract_patent_number(*parts: str) -> str:
-    """Vytiahne patentové číslo z textu, URL alebo názvu výsledku."""
+    """Extract a patent number from a result's text, URL or title."""
     text = " ".join(part or "" for part in parts)
     match = PATENT_NUMBER_RE.search(unquote(text).upper())
     return match.group(1).upper() if match else "Unknown"
 
 
 def _allowed_domain(url: str) -> bool:
-    """Overí, či URL patrí do povolených patentových domén."""
+    """Check whether a URL belongs to the allowed patent domains."""
     domain = urlsplit(url).netloc.lower()
     return any(domain.endswith(allowed) for allowed in ALLOWED_PATENT_DOMAINS)
 
 
 def _is_root_or_portal(url: str, title: str) -> bool:
-    """Zistí, či výsledok smeruje iba na portál alebo koreňovú stránku."""
+    """Determine whether a result points only at a portal or a root page."""
     parsed = urlsplit(url)
     path = parsed.path.strip("/").lower()
     title_l = title.strip().lower()
@@ -32,7 +32,7 @@ def _is_root_or_portal(url: str, title: str) -> bool:
 
 
 def _looks_like_patent_detail_url(url: str, patent_number: str) -> bool:
-    """Zistí, či adresa vyzerá ako stránka detailu konkrétneho patentu."""
+    """Determine whether a URL looks like a specific patent's detail page."""
     parsed = urlsplit(url)
     domain = parsed.netloc.lower()
     url_u = unquote(url).upper()
@@ -52,14 +52,14 @@ def _looks_like_patent_detail_url(url: str, patent_number: str) -> bool:
 
 
 def _looks_like_search_ui(title: str, snippet: str) -> bool:
-    """Zistí, či text výsledku vyzerá ako vyhľadávacie rozhranie."""
+    """Determine whether a result's text looks like a search interface."""
     text = f"{title} {snippet}".lower()
     noise_terms = ("group by", "results / page", "deduplicate by", "sort by", "about 10 results")
     return any(term in text for term in noise_terms)
 
 
 def is_valid_patent_result(title: str, patent_number: str, url: str, snippet: str = "") -> bool:
-    """Overí, či výsledok vyzerá ako konkrétna patentová stránka."""
+    """Check whether a result looks like a specific patent page."""
     if not url or not _allowed_domain(url):
         return False
     if _is_root_or_portal(url, title):

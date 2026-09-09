@@ -1,4 +1,4 @@
-"""Pomocné funkcie na obmedzenie počtu vyhľadávacích variantov."""
+"""Helpers for bounding the number of search variants."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ SECTION_HEADER_RE = re.compile(r"^[A-Z][A-Z0-9_ -]{1,48}:")
 
 
 def _dedupe_candidates(candidates: list[str], source: str, max_variants: int) -> list[str]:
-    """Odstráni duplicitné varianty dotazu a ponechá len povolený počet."""
+    """Remove duplicate query variants and keep only the permitted number."""
     seen: set[str] = set()
     variants = []
     for candidate in candidates:
@@ -33,7 +33,7 @@ def _dedupe_candidates(candidates: list[str], source: str, max_variants: int) ->
 
 
 def section_query_variants(query: str, label: str, max_variants: int = 2, legacy_marker: str | None = None) -> list[str]:
-    """Získa varianty dotazu zo sekcie plánu alebo zo staršieho textového formátu."""
+    """Read the query variants from a plan section or from the older text format."""
     source = query or ""
     lines = source.splitlines()
     candidates: list[str] = []
@@ -56,12 +56,12 @@ def section_query_variants(query: str, label: str, max_variants: int = 2, legacy
 
 
 def compact_query_variants(query: str, max_variants: int = 2) -> list[str]:
-    """Vráti skrátený zoznam patentových variantov dotazu."""
+    """Return a shortened list of patent query variants."""
     return section_query_variants(query, "PATENT_QUERIES", max_variants, "patent search queries")
 
 
 def patent_search_plan(query: str, max_variants: int = 2, max_domains: int = 5, max_requests: int = 10) -> list[tuple[str, str]]:
-    """Pripraví kombinácie patentových dotazov a povolených domén."""
+    """Prepare the combinations of patent queries and allowed domains."""
     plan: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for variant in compact_query_variants(query, max_variants=max_variants):

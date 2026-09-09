@@ -1,4 +1,4 @@
-"""Spoločné pomocné funkcie na čistenie a skracovanie textu."""
+"""Shared helpers for cleaning and truncating text."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ from bs4 import BeautifulSoup
 
 
 def clean_output(text: str) -> str:
-    """Odstráni šum a znormalizuje textový výstup nástroja."""
+    """Remove noise and normalise a tool's text output."""
     text = re.sub(r"!\[[^\]]*]\([^)]*\)", "", text or "")
     text = BeautifulSoup(text, _BS4_PARSER).get_text("\n")
     banned = ("javascript:", "void(0)", "cookie", "privacy policy", "terms of service", "all rights reserved")
@@ -60,14 +60,14 @@ def clean_output(text: str) -> str:
 
 _MAX_UNESCAPE_PASSES = 3
 
-# Balast, ktorý sa dostáva do súhrnov z navigácie stránok, README súborov
-# a z výstupu záložných čítačiek obsahu. Nenesie žiadnu dôkaznú hodnotu.
+# Clutter that reaches summaries from page navigation, README files and the
+# output of fallback content readers. It carries no evidential value.
 _BOILERPLATE_PATTERNS = (
-    # Markdown nadpisy a "# Repository:" hlavička z čítačky README.
+    # Markdown headings and the "# Repository:" header from the README reader.
     re.compile(r"(?m)^\s*#{1,6}\s*(?:Repository\s*:)?\s*"),
-    # Metadáta repozitárov: "- Stars: 0 - Forks: 0 - Watchers: 3".
+    # Repository metadata: "- Stars: 0 - Forks: 0 - Watchers: 3".
     re.compile(r"[-–—]?\s*(?:Stars|Forks|Watchers|Issues|Contributors|Followers)\s*:\s*[\d,]*\s*", re.IGNORECASE),
-    # Navigačné a marketingové výzvy.
+    # Navigational and marketing calls to action.
     re.compile(
         r"\b(?:click here(?:\s+to\s+\w+(?:\s+\w+){0,3})?|is available now|skip to (?:content|main)"
         r"|sign in|log in|subscribe(?:\s+now)?|read more|learn more|get started|contact us"
@@ -75,14 +75,14 @@ _BOILERPLATE_PATTERNS = (
         re.IGNORECASE,
     ),
 )
-# Opakovaný rovnaký výraz oddelený zvislou čiarou: "Rootly | Rootly ...".
+# The same phrase repeated across a pipe: "Rootly | Rootly ...".
 _PIPE_REPEAT_RE = re.compile(r"\b([\w][\w .'-]{0,40}?)\s*\|\s*\1\b", re.IGNORECASE)
-# Bezprostredne zopakované slovo: "Product Product".
+# An immediately repeated word: "Product Product".
 _WORD_REPEAT_RE = re.compile(r"\b(\w{2,})(\s+\1\b)+", re.IGNORECASE)
 
 
 def unescape_entities(text: str) -> str:
-    """Rozkóduje HTML entity aj pri viacnásobnom zakódovaní ("&amp;amp;")."""
+    """Decode HTML entities, including multiply-encoded ones ("&amp;amp;")."""
     current = str(text or "")
     for _ in range(_MAX_UNESCAPE_PASSES):
         decoded = html.unescape(current)
@@ -93,14 +93,14 @@ def unescape_entities(text: str) -> str:
 
 
 def collapse_repeats(text: str) -> str:
-    """Zlúči bezprostredne zopakované slová a výrazy oddelené zvislou čiarou."""
+    """Collapse immediately repeated words and phrases separated by a pipe."""
     collapsed = _PIPE_REPEAT_RE.sub(r"\1", str(text or ""))
     collapsed = _WORD_REPEAT_RE.sub(r"\1", collapsed)
     return re.sub(r"\s+", " ", collapsed).strip()
 
 
 def strip_boilerplate(text: str) -> str:
-    """Odstráni navigačný a metadátový balast bez dôkaznej hodnoty."""
+    """Strip navigational and metadata clutter that carries no evidential value."""
     cleaned = str(text or "")
     for pattern in _BOILERPLATE_PATTERNS:
         cleaned = pattern.sub(" ", cleaned)
@@ -109,10 +109,11 @@ def strip_boilerplate(text: str) -> str:
 
 
 def strip_leading_title(summary: str, title: str) -> str:
-    """Odstráni zo začiatku súhrnu zopakovaný názov zdroja.
+    """Remove a repeated source title from the start of a summary.
 
-    Načítané stránky často začínajú vlastným nadpisom, ktorý sa v reporte
-    zobrazuje hneď nad súhrnom; bez odstránenia je nález uvedený dvakrát.
+    Fetched pages often begin with their own heading, which the report already
+    displays directly above the summary. Without stripping it, the hit appears
+    twice.
     """
     body = str(summary or "").strip()
     head = re.sub(r"\s+", " ", str(title or "")).strip()
@@ -125,14 +126,14 @@ def strip_leading_title(summary: str, title: str) -> str:
 
 
 def strip_json_fences(text: str) -> str:
-    """Odstráni markdown wrapper okolo JSON textu."""
+    """Remove the markdown wrapper around JSON text."""
     text = re.sub(r"^```(?:json)?\s*\n?", "", (text or "").strip(), flags=re.IGNORECASE)
     text = re.sub(r"\n?```\s*$", "", text.strip())
     return text.strip()
 
 
 def format_error(tool_name: str, reason: str, url: str | None = None) -> str:
-    """Vytvorí jednotný text chyby pre zlyhaný nástroj."""
+    """Build the uniform error text for a failed tool."""
     lines = [f"TOOL_ERROR: {tool_name}", f"REASON: {reason}"]
     if url:
         lines.append(f"URL: {url}")
@@ -140,7 +141,7 @@ def format_error(tool_name: str, reason: str, url: str | None = None) -> str:
 
 
 def trim_words(text: str, limit: int) -> str:
-    """Skráti text na zadaný počet slov."""
+    """Truncate a text to the given number of words."""
     words = re.findall(r"\S+", re.sub(r"\s+", " ", text or "").strip())
     if len(words) <= limit:
         return " ".join(words)
@@ -148,7 +149,7 @@ def trim_words(text: str, limit: int) -> str:
 
 
 def first_match(patterns: Iterable[str], text: str, default: str = "Unknown") -> str:
-    """Vráti prvú hodnotu nájdenú pomocou zadaných regulárnych výrazov."""
+    """Return the first value found by the given regular expressions."""
     for pattern in patterns:
         found = re.search(pattern, text, flags=re.IGNORECASE)
         if found:
@@ -157,5 +158,5 @@ def first_match(patterns: Iterable[str], text: str, default: str = "Unknown") ->
 
 
 def soup_text(node: BeautifulSoup | None) -> str:
-    """Získa čistý text z uzla spracovaného cez BeautifulSoup."""
+    """Extract clean text from a node parsed by BeautifulSoup."""
     return re.sub(r"\n{2,}", "\n", node.get_text("\n", strip=True) if node else "").strip()

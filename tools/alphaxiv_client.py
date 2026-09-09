@@ -1,11 +1,11 @@
-"""Klient pre vzdialený AlphaXiv MCP server.
+"""Client for the remote AlphaXiv MCP server.
 
-AlphaXiv (alphaxiv.org) vystavuje výskumné nástroje ako skutočný MCP server
-na https://api.alphaxiv.org/mcp/v1 s autorizáciou cez API kľúč v hlavičke
-Authorization: Bearer <kľúč> (Settings > API Keys na alphaxiv.org). Tento
-modul volá jeho nástroj `discover_papers` na doplnkové publikačné
-vyhľadávanie. Integrácia je vždy voliteľná: bez nastaveného
-ALPHAXIV_API_KEY sa nepokúša o žiadne pripojenie.
+AlphaXiv (alphaxiv.org) exposes its research tools as a real MCP server at
+https://api.alphaxiv.org/mcp/v1, authorised by an API key in the
+Authorization: Bearer <key> header (Settings > API Keys on alphaxiv.org). This
+module calls its `discover_papers` tool as a supplementary publication search.
+The integration is always optional: with no ALPHAXIV_API_KEY set, no connection
+is attempted at all.
 """
 
 from __future__ import annotations
@@ -23,11 +23,11 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _streamable_http_client():
-    """Vráti klienta Streamable HTTP transportu naprieč verziami balíka mcp.
+    """Return the Streamable HTTP transport client across versions of the mcp package.
 
-    Funkcia sa vo verzii 2.0 premenovala z `streamablehttp_client` na
-    `streamable_http_client`. Import prebieha až pri volaní, takže nedostupnosť
-    tohto voliteľného transportu nikdy nezhodí import celého balíka.
+    The function was renamed in 2.0 from `streamablehttp_client` to
+    `streamable_http_client`. The import happens at call time, so the absence of
+    this optional transport can never break the import of the whole package.
     """
     from mcp.client import streamable_http as transport
 
@@ -43,18 +43,18 @@ _STRUCTURED_LIST_KEYS = ("result", "papers", "results", "data", "items")
 
 
 def alphaxiv_api_key() -> str:
-    """Načíta AlphaXiv API kľúč z premenných prostredia."""
+    """Read the AlphaXiv API key from the environment variables."""
     return os.getenv("ALPHAXIV_API_KEY", "").strip()
 
 
 def extract_call_result_items(result: CallToolResult) -> list[Any]:
-    """Vytiahne zoznam položiek z výsledku volania MCP nástroja.
+    """Extract the list of items from an MCP tool call result.
 
-    Skúša najprv structuredContent (bežné pre nástroje s deklarovanou
-    výstupnou schémou), potom textové bloky obsahu — každý blok môže byť
-    samostatný JSON objekt (FastMCP takto serializuje zoznamy) alebo jeden
-    blok s celým JSON poľom. Ak nič nie je platný JSON, vráti spojený text
-    ako jednu položku pre záložný textový parser.
+    Tries structuredContent first, which is usual for tools that declare an
+    output schema, then the textual content blocks. Each block may be a separate
+    JSON object -- this is how FastMCP serialises lists -- or one block holding
+    the whole JSON array. If nothing is valid JSON, the joined text is returned
+    as a single item for the fallback text parser.
     """
     if result.isError:
         return []
@@ -93,10 +93,10 @@ def extract_call_result_items(result: CallToolResult) -> list[Any]:
 async def discover_papers_via_session(
     session: ClientSession, query: str, difficulty: int = 5
 ) -> list[Any]:
-    """Zavolá nástroj discover_papers na už pripojenej MCP relácii.
+    """Call the discover_papers tool on an already connected MCP session.
 
-    Vydelená od sieťového pripojenia, aby sa dala testovať cez in-memory
-    MCP server bez akéhokoľvek prístupu na sieť.
+    Kept separate from the network connection so that it can be tested against
+    an in-memory MCP server without any network access at all.
     """
     keywords = [term for term in query.split() if term][:12]
     result = await session.call_tool(
@@ -107,11 +107,11 @@ async def discover_papers_via_session(
 
 
 async def discover_papers(query: str, timeout_s: float = ALPHAXIV_TIMEOUT_S) -> list[Any]:
-    """Pripojí sa k AlphaXiv MCP serveru a vyhľadá relevantné publikácie.
+    """Connect to the AlphaXiv MCP server and search for relevant publications.
 
-    Vráti prázdny zoznam, ak kľúč nie je nastavený alebo volanie akokoľvek
-    zlyhá; tento provider je vždy len doplnkový a nesmie zhodiť ani spomaliť
-    publikačné vyhľadávanie nad rámec vlastného časového limitu.
+    Returns an empty list if the key is not set or the call fails in any way.
+    This provider is always supplementary and must never break publication
+    search, nor slow it down beyond its own timeout.
     """
     api_key = alphaxiv_api_key()
     if not api_key or not query.strip():
