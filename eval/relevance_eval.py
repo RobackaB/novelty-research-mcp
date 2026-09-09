@@ -1,15 +1,15 @@
-"""Meranie kvality hodnotenia relevancie na gold-standard datasete.
+"""Measuring relevance scoring quality against a gold-standard dataset.
 
-Harness je zámerne offline: pracuje nad uloženými kandidátmi z datasetu,
-takže výsledky sú reprodukovateľné a nezávisia od toho, čo práve vrátia
-externí poskytovatelia. Slúži na porovnanie skórovacích funkcií pred a po
-zmene (bod „merateľné metriky" z obhajoby).
+The harness is deliberately offline: it works over the candidates stored in the
+dataset, so results reproduce exactly and do not depend on whatever the external
+providers happen to return. It exists to compare scoring functions before and
+after a change -- the "measurable metrics" point from the thesis defence.
 
 Every query is scored at the threshold the server actually applies to its source
 type (see tools.relevance.THRESHOLDS). Pass --threshold to override that for one
 run, or --sweep to see the whole precision/recall curve.
 
-Spustenie:
+Running it:
     python -m eval.relevance_eval
     python -m eval.relevance_eval --sweep
     python -m eval.relevance_eval --json
@@ -50,7 +50,7 @@ def production_threshold(evidence_type: str) -> float:
 
 @dataclass
 class QueryResult:
-    """Výsledok vyhodnotenia jedného dotazu."""
+    """The evaluation result for a single query."""
 
     query_id: str
     provenance: str
@@ -65,28 +65,28 @@ class QueryResult:
 
     @property
     def precision(self) -> float:
-        """Podiel skutočne relevantných medzi prijatými dokumentmi."""
+        """The share of genuinely relevant documents among those accepted."""
         return self.accepted_relevant / self.accepted_total if self.accepted_total else 0.0
 
     @property
     def recall(self) -> float:
-        """Podiel zachytených relevantných dokumentov."""
+        """The share of relevant documents that were caught."""
         return self.accepted_relevant / self.relevant_total if self.relevant_total else 0.0
 
     @property
     def f1(self) -> float:
-        """Harmonický priemer presnosti a úplnosti."""
+        """The harmonic mean of precision and recall."""
         p, r = self.precision, self.recall
         return 2 * p * r / (p + r) if (p + r) else 0.0
 
 
 def load_dataset(path: Path = DATASET_PATH) -> dict[str, Any]:
-    """Načíta gold-standard dataset zo súboru."""
+    """Load the gold-standard dataset from its file."""
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _doc_text(candidate: dict[str, Any]) -> str:
-    """Spojí názov a text kandidáta do jedného hodnoteného bloku."""
+    """Join a candidate's title and text into a single scored block."""
     return f"{candidate.get('title', '')}\n{candidate.get('text', '')}".strip()
 
 
@@ -98,7 +98,7 @@ def evaluate_query(
     accept_fn: Callable[..., bool] | None = None,
     use_idf: bool = True,
 ) -> QueryResult:
-    """Vyhodnotí jeden dotaz datasetu a vráti metriky kvality."""
+    """Evaluate one query of the dataset and return its quality metrics."""
     score_fn = score_fn or evidence_score
     accept_fn = accept_fn or is_relevant
     query = query_entry["query"]
@@ -109,8 +109,8 @@ def evaluate_query(
     resolved_threshold = production_threshold(evidence_type) if threshold is None else threshold
 
     texts = [_doc_text(candidate) for candidate in candidates]
-    # Vzácnosť termínov sa počíta nad rovnakou množinou kandidátov, akú by
-    # v produkcii vrátili poskytovatelia pre daný dotaz.
+    # Term rarity is computed over the same candidate set the providers would
+    # return for this query in production.
     idf = build_corpus_idf(texts) if use_idf else {}
 
     scored: list[tuple[float, int, str, bool]] = []
@@ -123,7 +123,7 @@ def evaluate_query(
         )
         scored.append((score, int(candidate["label"]), str(candidate.get("title", "")), accepted))
 
-    # Zoradenie podľa skóre určuje poradie, v akom by ich systém prezentoval.
+    # Ordering by score gives the sequence in which the system would present them.
     scored.sort(key=lambda row: row[0], reverse=True)
 
     relevant_total = sum(1 for _s, label, _t, _a in scored if label == 1)
@@ -167,7 +167,7 @@ def evaluate_dataset(
     accept_fn: Callable[..., bool] | None = None,
     use_idf: bool = True,
 ) -> tuple[list[QueryResult], dict[str, float]]:
-    """Vyhodnotí celý dataset a vráti výsledky aj súhrnné metriky."""
+    """Evaluate the whole dataset and return both the results and the summary metrics."""
     data = dataset if dataset is not None else load_dataset()
     results = [
         evaluate_query(
@@ -231,7 +231,7 @@ def format_sweep(
 
 
 def format_report(results: list[QueryResult], summary: dict[str, float], *, show_ranking: bool = True) -> str:
-    """Zostaví čitateľnú textovú správu z výsledkov merania."""
+    """Build a readable text report from the measurement results."""
     lines: list[str] = []
     lines.append("=" * 78)
     lines.append("VYHODNOTENIE KVALITY HODNOTENIA RELEVANCIE")
@@ -265,7 +265,7 @@ def format_report(results: list[QueryResult], summary: dict[str, float], *, show
 
 
 def main() -> None:
-    """Spustí vyhodnotenie datasetu a vypíše správu."""
+    """Run the dataset evaluation and print the report."""
     parser = argparse.ArgumentParser(description="Meranie kvality hodnotenia relevancie.")
     parser.add_argument("--json", action="store_true", help="vypíše výsledky ako JSON")
     parser.add_argument(
