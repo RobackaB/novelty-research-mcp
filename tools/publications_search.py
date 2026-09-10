@@ -19,7 +19,20 @@ from .search_bounds import section_query_variants
 
 FAILURE_TERMS = ("tool_error:", "429", "rate limit", "too many requests", "timed out", "timeout", "failed because")
 PUBLICATION_CANDIDATE_POOL_SIZE = 15
-MIN_PUBLICATION_RERANK_SCORE = 3.5
+# Publication-specific acceptance threshold. It is stricter than
+# tools.relevance.THRESHOLDS["PUBLICATION"] (3.0), and applied at every
+# publication filtering stage: each provider's own filter and the merged
+# second-pass rerank. The previous name, MIN_PUBLICATION_RERANK_SCORE, described
+# only one of its nine call sites and read as if reranking were the only place it
+# applied.
+#
+# The value predates the audit: it is present in the thesis submission commit
+# (eb7b532) alongside THRESHOLDS["PUBLICATION"] = 3.0, so the divergence is
+# longstanding rather than later audit drift. No commit message, AUDIT entry or
+# CHANGELOG entry records the original rationale, so intent cannot be established;
+# preserve the value rather than retuning it on the 20-candidate evaluation set
+# (see AUDIT.md section 14.4).
+MIN_PUBLICATION_RELEVANCE_SCORE = 3.5
 ABSTRACT_WORD_LIMIT = 60
 QUERY_FILLER_RE = re.compile(
     r"\b(?:does|do|a|an|the|for|of|to|is|are|in|on|by|with|as|at|or|and|"
@@ -106,7 +119,7 @@ def _filter_publication_text(query: str, text: str, max_results: int) -> str:
     ranked = [
         (evidence_score(query, block, "PUBLICATION"), block)
         for block in blocks
-        if is_relevant(query, block, "PUBLICATION", threshold=MIN_PUBLICATION_RERANK_SCORE)
+        if is_relevant(query, block, "PUBLICATION", threshold=MIN_PUBLICATION_RELEVANCE_SCORE)
     ]
     ranked.sort(key=lambda item: item[0], reverse=True)
     return "\n\n".join(block for _score, block in ranked[:max(1, min(max_results, 20))])
@@ -204,7 +217,7 @@ def _format_alpha_item(item: dict[str, object], relevance_query: str) -> tuple[f
     author_label = "Organizations listed for this publication result" if is_organizations else "Authors listed for this publication result"
     score_text = f"{title} {abstract}"
     score = evidence_score(relevance_query, score_text, "PUBLICATION")
-    if not is_relevant(relevance_query, score_text, "PUBLICATION", threshold=MIN_PUBLICATION_RERANK_SCORE):
+    if not is_relevant(relevance_query, score_text, "PUBLICATION", threshold=MIN_PUBLICATION_RELEVANCE_SCORE):
         return None
     lines = [
         f"Publication title returned by AlphaXiv: **{title}**.",
@@ -234,7 +247,7 @@ def _alpha_text_blocks(output: str, relevance_query: str, max_results: int) -> l
         title = re.sub(r"\s+", " ", title_match.group(1)).strip(" *.:-")
         abstract = re.sub(r"\s+", " ", abstract_match.group(1)).strip() if abstract_match else raw_block
         score = evidence_score(relevance_query, f"{title} {abstract}", "PUBLICATION")
-        if not is_relevant(relevance_query, f"{title} {abstract}", "PUBLICATION", threshold=MIN_PUBLICATION_RERANK_SCORE):
+        if not is_relevant(relevance_query, f"{title} {abstract}", "PUBLICATION", threshold=MIN_PUBLICATION_RELEVANCE_SCORE):
             continue
         lines = [
             f"Publication title returned by AlphaXiv: **{title}**.",
@@ -503,7 +516,7 @@ async def _pubmed_blocks(
                 relevance_query,
                 f"{title} {abstract}",
                 "PUBLICATION",
-                threshold=MIN_PUBLICATION_RERANK_SCORE,
+                threshold=MIN_PUBLICATION_RELEVANCE_SCORE,
             ):
                 continue
             blocks.append(
@@ -651,7 +664,7 @@ async def _openalex_blocks(
                 relevance_query,
                 f"{title} {abstract}",
                 "PUBLICATION",
-                threshold=MIN_PUBLICATION_RERANK_SCORE,
+                threshold=MIN_PUBLICATION_RELEVANCE_SCORE,
             ):
                 continue
             excerpt = _relevant_abstract_excerpt(abstract, relevance_query)
@@ -691,7 +704,7 @@ async def _crossref_blocks(
                 relevance_query,
                 f"{title} {abstract}",
                 "PUBLICATION",
-                threshold=MIN_PUBLICATION_RERANK_SCORE,
+                threshold=MIN_PUBLICATION_RELEVANCE_SCORE,
             ):
                 continue
             excerpt = _relevant_abstract_excerpt(abstract, relevance_query)
@@ -743,7 +756,7 @@ def _rerank_with_corpus_idf(
     for _score, block in blocks:
         new_score = evidence_score(relevance_query, block, "PUBLICATION", idf=idf)
         if is_relevant(
-            relevance_query, block, "PUBLICATION", threshold=MIN_PUBLICATION_RERANK_SCORE, idf=idf
+            relevance_query, block, "PUBLICATION", threshold=MIN_PUBLICATION_RELEVANCE_SCORE, idf=idf
         ):
             rescored.append((new_score, block))
         else:
@@ -838,7 +851,7 @@ async def _semantic_scholar_blocks(
             )
             score = evidence_score(relevance_query, block, "PUBLICATION")
             if not is_relevant(
-                relevance_query, block, "PUBLICATION", threshold=MIN_PUBLICATION_RERANK_SCORE
+                relevance_query, block, "PUBLICATION", threshold=MIN_PUBLICATION_RELEVANCE_SCORE
             ):
                 continue
             block = f"Local rerank score for this publication: {score}/10.\n{block}"
@@ -883,7 +896,7 @@ async def _arxiv_blocks_safe(
                     continue
                 score = evidence_score(relevance_query, block, "PUBLICATION")
                 if not is_relevant(
-                    relevance_query, block, "PUBLICATION", threshold=MIN_PUBLICATION_RERANK_SCORE
+                    relevance_query, block, "PUBLICATION", threshold=MIN_PUBLICATION_RELEVANCE_SCORE
                 ):
                     continue
                 key = block.lower()[:200]
