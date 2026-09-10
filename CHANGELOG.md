@@ -8,6 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Every release keeps the 7 MCP tool interfaces (names, parameters, response shape)
 compatible with the exported Flowise architecture.
 
+## [0.9.8] Behavioural hardening: deterministic ordering and threshold naming
+
+### Changed
+
+- Merged web result ordering now uses the URL as a final deterministic tie-break. The key was `(-score, _rank_domain(url))`, and `_rank_domain` returns `(rank, domain)`, so two different URLs on the same domain with the same score produced an identical key and fell through to `merged_results` insertion order. That set the displayed order and, at the `max_results` cut boundary, could decide which results appeared at all. `merged_results` is keyed by URL, so the URL is unique by construction and the key is now total.
+- `grade_source` now breaks equal quality scores with a stable identity tuple (`canonical_id`, `url`, `title`, `evidence_level`, each normalised). Sorting by score alone let the caller's list order choose `top_hit`, which determines the returned `top_evidence_level`. The tie is reachable in ordinary data: a hit carrying an explicit `relevance_score` skips the evidence-level multiplier, so `claim_verified` and `abstract_verified` both score 7.08 at `relevance_score` 6.25. Score remains the primary criterion; the tuple breaks ties only, and its final component carries no evidence-strength ranking.
+- `MIN_PUBLICATION_RERANK_SCORE` renamed to `MIN_PUBLICATION_RELEVANCE_SCORE`. The value applies across publication filtering stages, not only reranking. The value remains **3.5** and the generic `THRESHOLDS["PUBLICATION"]` remains **3.0**. Repository history does not establish why the two originally diverged; both are present in the thesis submission commit. **No threshold retuning was performed.**
+
+### Added
+
+- An MCP interface contract fixture pinning the 7 tool names, their parameters and their required flags, established before any description-language experiment. Description *text* is deliberately not pinned, so a language experiment can proceed without weakening the contract.
+- Goal 4 added **20 tests across four new test files**: `test_mcp_interface_contract` (5), `test_publication_threshold_contract` (6), `test_web_search_tie_break` (5), `test_evidence_quality_tie_break` (4). The 2 tests in `test_determinism.py` date from v0.9.6 and were rerun, not added here.
+
+### Verification
+
+- Full suite: **301 passed**, stable across multiple `PYTHONHASHSEED` values.
+- Offline relevance evaluation unchanged: precision **0.611**, recall **0.833**, F1 **0.683**.
+- The existing determinism digests were unchanged where applicable, so the guarded workloads' non-tie outputs did not move.
+- The behavioural tie-break regression tests were validated against their pre-fix behaviour. The publication-name guards were exercised with deliberate violations. The existing determinism guard had already been validated against the known v0.9.5 defect.
+
+### Not changed deliberately
+
+- **MCP tool description language.** The 7 `@mcp.tool()` descriptions remain Slovak. The Slovak-vs-English routing experiment is deferred: no real Flowise/LLM routing measurement is available, and no production change is justified without one.
+- **Semantic evidence-level ranking** was not introduced. The `grade_source` change is determinism hardening only.
+- **Threshold values** were not retuned; the evaluation dataset is 3 queries and 20 candidates, far too small to justify it (see `AUDIT.md` section 14.4).
+- **Duplicate `the` in `QUERY_FILLER_RE`** — verified to be a regex no-op and closed.
+- **`_hit_sort.sort_hits_by_relevance`** keys on `(relevance rank, relevance score)` with no unique final identity component, so tied hits keep the caller's list order. This is a caller-order dependency, not hash nondeterminism. Its three evidence-pack call sites do not truncate the list after the sort, so it affects display ordering only and does not decide which hits survive. Recorded as a remaining low-severity robustness candidate.
+
+### Documentation
+
+- Two `AUDIT.md` headings were still Slovak (`Overenie`) — sections 14.9 and 18.4 — documentation-only stragglers from the v0.9.7 translation, found during the Goal 4 completion audit; both now read `Verification`. Section 18.3 gains a short post-audit note recording that both of its recorded candidates were hardened in v0.9.8. Section 18.2 remains the historical v0.9.6 audit record and is not rewritten.
+
 ## [0.9.7] Documentation translated to English, Slovak localisation corrected
 
 ### Changed

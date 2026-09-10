@@ -704,7 +704,7 @@ to land identically regardless of which anchors are chosen, so the old regressio
 guard passed on every run. Only at the production thresholds do the outcomes
 diverge. **The wrong measurement configuration was masking the defect.**
 
-### 14.9 Overenie v0.9.5
+### 14.9 Verification v0.9.5
 
 - `python -m pytest` — **276 passed**, six consecutive runs, no flakes. Before the
   fix the re-pinned guard failed 2 runs in 6.
@@ -908,7 +908,12 @@ on the caller passing an ordered container. Adding a final unique tie-break
 it would change the current output ordering, which is a behavioural change and
 was therefore not made as part of an audit. Recorded here as a candidate.
 
-### 18.4 Overenie
+**Post-audit note (v0.9.8).** Both candidates were subsequently hardened with
+explicit stable tie-breaks: `url` for merged web results, and an identity tuple
+for `top_hit` selection. Section 18.2 above remains the historical v0.9.6 audit
+record and is deliberately not rewritten; see CHANGELOG 0.9.8 for those changes.
+
+### 18.4 Verification
 
 - `python -m pytest` — **278 passed**, unchanged across `PYTHONHASHSEED` values
   0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144.
