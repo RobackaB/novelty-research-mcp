@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .decision_capture import CollectorContext, DecisionCollector
 from .evidence_quality import grade_source, hit_quality_score
 from .final_answer_pack import final_answer_pack
 from .merge_evidence_pack import merge_evidence_pack
@@ -226,6 +227,36 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             payload_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS evaluation_candidate_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            schema_version TEXT NOT NULL DEFAULT 'candidate_decision.v1',
+            query_fingerprint TEXT NOT NULL DEFAULT '',
+            query_envelope_hash TEXT NOT NULL DEFAULT '',
+            example_id TEXT NOT NULL DEFAULT '',
+            session_id TEXT NOT NULL DEFAULT '',
+            run_id TEXT NOT NULL DEFAULT '',
+            source_type TEXT NOT NULL DEFAULT '',
+            attempt INTEGER NOT NULL DEFAULT 0,
+            decision_stage TEXT NOT NULL DEFAULT '',
+            decision_reason TEXT NOT NULL DEFAULT '',
+            candidate_identity TEXT NOT NULL DEFAULT '',
+            candidate_identity_kind TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            score_text TEXT NOT NULL DEFAULT '',
+            decision_query TEXT NOT NULL DEFAULT '',
+            query_variant TEXT NOT NULL DEFAULT '',
+            provider TEXT NOT NULL DEFAULT '',
+            score_at_decision REAL,
+            threshold_at_decision REAL,
+            retained INTEGER,
+            dataset_eligible INTEGER NOT NULL DEFAULT 1,
+            payload_json TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_eval_decisions_fingerprint
+        ON evaluation_candidate_decisions(query_fingerprint, source_type, decision_stage);
 
         CREATE TABLE IF NOT EXISTS schema_migrations (
             name TEXT PRIMARY KEY,
@@ -766,6 +797,110 @@ def _row_has_focused_hit(row: sqlite3.Row | None) -> bool:
         if isinstance(hit, dict) and str(hit.get("relevance") or "").lower() == "focused":
             return True
     return False
+
+
+def _persist_decision_events(collector: Any) -> None:
+    """Write collected decision events to their own table. Fail-open by design.
+
+    Capture is diagnostic. Any failure here is logged and swallowed: it must not
+    change the returned evidence, the ACK status, the retry behaviour, the
+    candidate ordering or any relevance decision.
+
+    score_text gets its own TEXT column rather than a diagnostic JSON blob,
+    because _safe_payload truncates those to 4000 characters and the dataset
+    builder needs the exact text the scorer saw.
+    """
+    if collector is None:
+        return
+    try:
+        events = list(getattr(collector, "events", []) or [])
+        if not events:
+            return
+        now = _now()
+        rows = [
+            (
+                e.get("schema_version", ""), e.get("query_fingerprint", ""),
+                e.get("query_envelope_hash", ""), e.get("example_id", ""),
+                e.get("session_id", ""), e.get("run_id", ""), e.get("source_type", ""),
+                int(e.get("attempt", 0) or 0), e.get("decision_stage", ""),
+                e.get("decision_reason", ""), e.get("candidate_identity", ""),
+                e.get("candidate_identity_kind", ""), e.get("title", ""),
+                e.get("score_text", ""), e.get("decision_query", ""), e.get("query_variant", ""), e.get("provider", ""),
+                e.get("score_at_decision"), e.get("threshold_at_decision"),
+                None if e.get("retained") is None else int(bool(e.get("retained"))),
+                int(bool(e.get("dataset_eligible", True))),
+                _compact_json(e.get("payload")) if e.get("payload") else "",
+                now,
+            )
+            for e in events
+        ]
+        with _connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO evaluation_candidate_decisions(
+                    schema_version, query_fingerprint, query_envelope_hash, example_id,
+                    session_id, run_id, source_type, attempt, decision_stage,
+                    decision_reason, candidate_identity, candidate_identity_kind, title,
+                    score_text, decision_query, query_variant, provider, score_at_decision,
+                    threshold_at_decision, retained, dataset_eligible, payload_json, created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                rows,
+            )
+    except Exception:  # noqa: BLE001 - capture must never affect retrieval
+        LOGGER.warning("decision persistence failed; evidence is unaffected", exc_info=True)
+
+
+def _new_decision_collector(
+    session_id: str, run_id: str, source_type: str, attempt: int, original_query: str
+) -> DecisionCollector | None:
+    """Build a collector carrying the provenance only this layer owns.
+
+    Returns None if capture setup fails for any reason. Setup runs before the
+    retrieval-error boundary, so an exception escaping here would turn a healthy
+    retrieval into a provider_error and trigger a needless retry. Capture is
+    diagnostic: losing it must cost nothing but the diagnostics.
+    """
+    try:
+        return _build_decision_collector(session_id, run_id, source_type, attempt, original_query)
+    except Exception:  # noqa: BLE001 - capture setup must never break retrieval
+        LOGGER.warning(
+            "decision capture setup failed; continuing without capture", exc_info=True
+        )
+        return None
+
+
+def _build_decision_collector(
+    session_id: str, run_id: str, source_type: str, attempt: int, original_query: str
+) -> DecisionCollector:
+    """Read session provenance and construct the collector."""
+    from .decision_capture import query_envelope_hash, query_fingerprint
+
+    # Read the session's ORIGINAL query and its stored envelope. The fingerprint
+    # must identify the user's query, not the cleaned or per-attempt search text,
+    # so retries and variants stay one evaluation sample. Missing rows are a real
+    # condition (the session may not exist yet), not an error to hide.
+    envelope_hash = ""
+    session_query = str(original_query or "")
+    with _connect() as conn:
+        row = _session_row(conn, _clean_session_id(session_id))
+    if row is not None:
+        stored_query = str(row["original_query"] or "")
+        if stored_query:
+            session_query = stored_query
+        envelope = _safe_json_loads(row["query_envelope_json"], {})
+        atoms = envelope.get("critical_requirements_atomic") if isinstance(envelope, dict) else None
+        envelope_hash = query_envelope_hash(atoms or [])
+    return DecisionCollector(
+        context=CollectorContext(
+            session_id=str(session_id or ""),
+            run_id=str(run_id or ""),
+            source_type=str(source_type or ""),
+            attempt=int(attempt or 0),
+            query_fingerprint=query_fingerprint(session_query),
+            query_envelope_hash=envelope_hash,
+        )
+    )
 
 
 def research_session_start(original_query: str, session_id: str = "") -> str:
@@ -3156,14 +3291,23 @@ async def patent_evidence_to_session(
         )
     atomic_requirements = _load_atomic_requirements(session_id)
     try:
-        evidence = await patent_evidence_pack(
-            query=clean_query,
-            max_results=max_results,
-            max_fetches=max_fetches,
-            fetch_timeout_ms=fetch_timeout_ms,
-            atomic_requirements=atomic_requirements,
-            english_query=english_query_clean,
+        _collector = _new_decision_collector(
+            session_id, run_id, "patent", int(begin["attempt"]), clean_query
         )
+        try:
+            evidence = await patent_evidence_pack(
+                query=clean_query,
+                max_results=max_results,
+                max_fetches=max_fetches,
+                fetch_timeout_ms=fetch_timeout_ms,
+                atomic_requirements=atomic_requirements,
+                english_query=english_query_clean,
+                _collector=_collector,
+            )
+        finally:
+            # Fail-open: persists whatever was collected before a provider
+            # failure, and can never turn a successful retrieval into a failure.
+            _persist_decision_events(_collector)
     except TimeoutError as exc:
         return research_session_record_failure(session_id, "patent", clean_query, "timeout", "timeout", str(exc), int(begin["attempt"]), run_id, "patent_sqlite_writer_agent", english_query_clean)
     except Exception as exc:
@@ -3221,14 +3365,23 @@ async def publication_evidence_to_session(
         )
     atomic_requirements = _load_atomic_requirements(session_id)
     try:
-        evidence = await publication_evidence_pack(
-            query=clean_query,
-            max_results=max_results,
-            max_fetches=max_fetches,
-            fetch_timeout_s=fetch_timeout_s,
-            english_query=english_query_clean,
-            atomic_requirements=atomic_requirements,
+        _collector = _new_decision_collector(
+            session_id, run_id, "publication", int(begin["attempt"]), clean_query
         )
+        try:
+            evidence = await publication_evidence_pack(
+                query=clean_query,
+                max_results=max_results,
+                max_fetches=max_fetches,
+                fetch_timeout_s=fetch_timeout_s,
+                english_query=english_query_clean,
+                atomic_requirements=atomic_requirements,
+                _collector=_collector,
+            )
+        finally:
+            # Fail-open: persists whatever was collected before a provider
+            # failure, and can never turn a successful retrieval into a failure.
+            _persist_decision_events(_collector)
     except TimeoutError as exc:
         return research_session_record_failure(session_id, "publication", clean_query, "timeout", "timeout", str(exc), int(begin["attempt"]), run_id, "publication_sqlite_writer_agent", english_query_clean)
     except Exception as exc:
@@ -3286,14 +3439,23 @@ async def web_evidence_to_session(
         )
     atomic_requirements = _load_atomic_requirements(session_id)
     try:
-        evidence = await web_evidence_pack(
-            query=clean_query,
-            max_results=max_results,
-            max_fetches=max_fetches,
-            timeout_ms=timeout_ms,
-            english_query=english_query_clean,
-            atomic_requirements=atomic_requirements,
+        _collector = _new_decision_collector(
+            session_id, run_id, "web", int(begin["attempt"]), clean_query
         )
+        try:
+            evidence = await web_evidence_pack(
+                query=clean_query,
+                max_results=max_results,
+                max_fetches=max_fetches,
+                timeout_ms=timeout_ms,
+                english_query=english_query_clean,
+                atomic_requirements=atomic_requirements,
+                _collector=_collector,
+            )
+        finally:
+            # Fail-open: persists whatever was collected before a provider
+            # failure, and can never turn a successful retrieval into a failure.
+            _persist_decision_events(_collector)
     except TimeoutError as exc:
         return research_session_record_failure(session_id, "web", clean_query, "timeout", "timeout", str(exc), int(begin["attempt"]), run_id, "web_sqlite_writer_agent", english_query_clean)
     except Exception as exc:

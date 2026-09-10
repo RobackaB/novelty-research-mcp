@@ -15,6 +15,7 @@ from bs4 import BeautifulSoup
 from .chromium_scraper import fetch_page_html
 from .jina_reader import fetch_via_jina
 from .output_cleaner import BLOCKED_WEB_DOMAINS, USER_AGENT, clean_output, format_error, trim_words
+from .decision_capture import safe_record
 from .relevance import build_corpus_idf, evidence_score, is_relevant, tokens
 from .requirement_match import unique_coverage_tokens
 from .result_contract import NormalizedResult, prepend_markers
@@ -639,7 +640,7 @@ def _ordered_results(
     )[: max(1, min(max_results, 10))]
 
 
-async def web_search(query: Any, max_results: int = 5) -> str:
+async def web_search(query: Any, max_results: int = 5, *, _collector: Any = None) -> str:
     """Search for web results and return cleaned records."""
     try:
         from .query_normalize import coerce_query_input
@@ -699,11 +700,66 @@ async def web_search(query: Any, max_results: int = 5) -> str:
                     slot["ok"] += 1
                     for url, title, snippet in payload:
                         if url in merged_results:
+                            # Production keeps the FIRST result for a URL and
+                            # discards this later one. The reason names that
+                            # outcome; the stored winner is not touched.
+                            safe_record(
+                                _collector,
+                                decision_stage="merge_collision",
+                                decision_reason="discarded_duplicate_url",
+                                title=title,
+                                url=url,
+                                score_text=f"{title}\n{snippet}",
+                                decision_query=relevance_query,
+                                query_variant=variant,
+                                provider=provider_name,
+                                payload={"kept_title": merged_results[url][1]},
+                            )
                             continue
                         score = _web_rerank_score(relevance_query, title, snippet)
                         if not _passes_web_rerank(relevance_query, title, snippet):
+                            # _passes_web_rerank fails on EITHER the query-overlap
+                            # gate OR the score threshold. Recomputing the overlap
+                            # check tells capture which one actually rejected the
+                            # candidate; production acceptance is unchanged, since
+                            # the branch is taken either way.
+                            overlap_ok = _query_overlap_match(
+                                relevance_query, f"{title}\n{snippet}"
+                            )
+                            safe_record(
+                                _collector,
+                                decision_stage="content_gate" if not overlap_ok else "provider_filter",
+                                decision_reason=(
+                                    "below_overlap_gate" if not overlap_ok else "below_threshold"
+                                ),
+                                title=title,
+                                url=url,
+                                score_text=f"{title}\n{snippet}",
+                                decision_query=relevance_query,
+                                query_variant=variant,
+                                provider=provider_name,
+                                score_at_decision=score,
+                                # A threshold is meaningful only for a score rejection.
+                                threshold_at_decision=None if not overlap_ok else MIN_WEB_RERANK_SCORE,
+                                retained=None if not overlap_ok else False,
+                            )
                             continue
-                        if not is_relevant(relevance_query, f"{title}\n{snippet}", "WEB", threshold=MIN_WEB_RERANK_SCORE):
+                        keep = is_relevant(relevance_query, f"{title}\n{snippet}", "WEB", threshold=MIN_WEB_RERANK_SCORE)
+                        safe_record(
+                            _collector,
+                            decision_stage="provider_filter",
+                            decision_reason="accepted" if keep else "below_threshold",
+                            title=title,
+                            url=url,
+                            score_text=f"{title}\n{snippet}",
+                            decision_query=relevance_query,
+                            query_variant=variant,
+                            provider=provider_name,
+                            score_at_decision=score,
+                            threshold_at_decision=MIN_WEB_RERANK_SCORE,
+                            retained=keep,
+                        )
+                        if not keep:
                             continue
                         merged_results[url] = (url, title, snippet, score)
                 elif status == "unavailable":

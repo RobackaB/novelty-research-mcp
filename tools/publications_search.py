@@ -13,6 +13,7 @@ import httpx
 from .alphaxiv_client import discover_papers as alphaxiv_discover_papers
 from .arxiv_search import arxiv_search
 from .output_cleaner import USER_AGENT, clean_output, format_error, trim_words
+from .decision_capture import safe_record
 from .relevance import _MIN_CORPUS_FOR_IDF, build_corpus_idf, evidence_score, is_relevant, tokens
 from .result_contract import NormalizedResult, prepend_markers
 from .search_bounds import section_query_variants
@@ -113,14 +114,76 @@ def _looks_failed(text: str) -> bool:
     return any(term in lower for term in FAILURE_TERMS)
 
 
-def _filter_publication_text(query: str, text: str, max_results: int) -> str:
+_MARKER_HEADER_RE = re.compile(r"^STATUS:\s", flags=re.MULTILINE)
+
+
+def _is_marker_header_block(block: str) -> bool:
+    """True when a block is a provider status header, not a candidate document.
+
+    prepend_markers emits STATUS/COMPLETED/RELIABLE_NO_RESULTS/ERROR_COUNT/QUERY
+    as the first block, and it is separated from the body by a blank line, so the
+    block splitter scores it like any other candidate. It echoes the query, which
+    makes it score well. Production filtering is deliberately unchanged; the
+    event is simply marked ineligible so it can never become a labelling example.
+    """
+    text = block or ""
+    return bool(_MARKER_HEADER_RE.search(text)) and "COMPLETED:" in text
+
+
+def _record_provider_gate(
+    collector: Any, *, block: str, query: str, executed_query: str, provider: str,
+    score: float, keep: bool,
+) -> None:
+    """Record one provider-level relevance gate. Passive; never affects filtering."""
+    safe_record(
+        collector,
+        decision_stage="provider_filter",
+        decision_reason="accepted" if keep else "below_threshold",
+        score_text=block,
+        decision_query=query,
+        query_variant=executed_query,
+        provider=provider,
+        score_at_decision=score,
+        threshold_at_decision=MIN_PUBLICATION_RELEVANCE_SCORE,
+        retained=keep,
+        dataset_eligible=not _is_marker_header_block(block),
+    )
+
+
+def _filter_publication_text(
+    query: str,
+    text: str,
+    max_results: int,
+    *,
+    _collector: Any = None,
+    _executed_query: str | None = None,
+) -> str:
     """Filter publication text blocks by their local relevance score."""
     blocks = [block.strip() for block in re.split(r"\n\s*\n", text or "") if block.strip()]
-    ranked = [
-        (evidence_score(query, block, "PUBLICATION"), block)
-        for block in blocks
-        if is_relevant(query, block, "PUBLICATION", threshold=MIN_PUBLICATION_RELEVANCE_SCORE)
-    ]
+    ranked: list[tuple[float, str]] = []
+    for block in blocks:
+        block_score = evidence_score(query, block, "PUBLICATION")
+        keep = is_relevant(query, block, "PUBLICATION", threshold=MIN_PUBLICATION_RELEVANCE_SCORE)
+        # Passive capture. safe_record cannot raise, and nothing below reads it.
+        safe_record(
+            _collector,
+            decision_stage="provider_filter",
+            decision_reason="accepted" if keep else "below_threshold",
+            score_text=block,
+            # decision_query is the scorer's input. query_variant is the query a
+            # provider actually executed, which in the fallback branches is the
+            # ArXiv argument, not the joined scoring query. Substituting the
+            # scoring query here misreported which call produced the block.
+            decision_query=query,
+            query_variant=query if _executed_query is None else _executed_query,
+            provider=_extract_block_provider(block),
+            score_at_decision=block_score,
+            threshold_at_decision=MIN_PUBLICATION_RELEVANCE_SCORE,
+            retained=keep,
+            dataset_eligible=not _is_marker_header_block(block),
+        )
+        if keep:
+            ranked.append((block_score, block))
     ranked.sort(key=lambda item: item[0], reverse=True)
     return "\n\n".join(block for _score, block in ranked[:max(1, min(max_results, 20))])
 
@@ -734,7 +797,7 @@ _IDF_RERANK_MIN_KEPT = 3
 
 
 def _rerank_with_corpus_idf(
-    blocks: list[tuple[float, str]], relevance_query: str
+    blocks: list[tuple[float, str]], relevance_query: str, *, _collector: Any = None
 ) -> tuple[list[tuple[float, str]], int]:
     """Re-score the merged candidates with weighting by term rarity.
 
@@ -755,9 +818,25 @@ def _rerank_with_corpus_idf(
     rejected: list[tuple[float, str]] = []
     for _score, block in blocks:
         new_score = evidence_score(relevance_query, block, "PUBLICATION", idf=idf)
-        if is_relevant(
+        keep = is_relevant(
             relevance_query, block, "PUBLICATION", threshold=MIN_PUBLICATION_RELEVANCE_SCORE, idf=idf
-        ):
+        )
+        safe_record(
+            _collector,
+            decision_stage="merged_rerank",
+            decision_reason="accepted" if keep else "below_threshold",
+            score_text=block,
+            decision_query=relevance_query,
+            # relevance_query is the join of every search variant, not a query any
+            # provider executed. Recording it as query_variant would misreport
+            # provenance, so the executed variant is left empty at this stage.
+            query_variant="",
+            provider=_extract_block_provider(block),
+            score_at_decision=new_score,
+            threshold_at_decision=MIN_PUBLICATION_RELEVANCE_SCORE,
+            retained=keep,
+        )
+        if keep:
             rescored.append((new_score, block))
         else:
             rejected.append((new_score, block))
@@ -767,6 +846,19 @@ def _rerank_with_corpus_idf(
     # back so that coverage of the source is not lost altogether.
     rejected.sort(key=lambda item: item[0], reverse=True)
     fill = _IDF_RERANK_MIN_KEPT - len(rescored)
+    for restored_score, restored_block in rejected[:fill]:
+        safe_record(
+            _collector,
+            decision_stage="fill_back",
+            decision_reason="restored_to_meet_minimum",
+            score_text=restored_block,
+            decision_query=relevance_query,
+            query_variant="",
+            provider=_extract_block_provider(restored_block),
+            score_at_decision=restored_score,
+            threshold_at_decision=MIN_PUBLICATION_RELEVANCE_SCORE,
+            retained=True,
+        )
     return rescored + rejected[:fill], max(0, len(rejected) - fill)
 
 
@@ -915,6 +1007,7 @@ async def _arxiv_blocks_safe(
 
 async def publications_search(
     query: Any, max_results: int = 5, english_query: str = ""
+, *, _collector: Any = None
 ) -> str:
     """Search for scholarly publications across the available providers."""
     from .query_normalize import coerce_query_input
@@ -1004,7 +1097,7 @@ async def publications_search(
                     seen_titles.add(title_key)
                 merged.append((score, block))
 
-        merged, idf_dropped = _rerank_with_corpus_idf(merged, relevance_query)
+        merged, idf_dropped = _rerank_with_corpus_idf(merged, relevance_query, _collector=_collector)
 
         def _sort_score(item: tuple[float, str]) -> float:
             """Adjust a result's score according to provider quality."""
@@ -1066,14 +1159,25 @@ async def publications_search(
 
         if rate_limited:
             try:
-                fallback = await arxiv_search(search_queries[0], max_results)
+                _arxiv_executed_query = search_queries[0]
+                fallback = await arxiv_search(_arxiv_executed_query, max_results)
             except Exception:
                 fallback = ""
             if _looks_failed(fallback):
                 return _publication_failure(
                     "Semantic Scholar returned 429 and Crossref/AlphaXiv/ArXiv fallbacks also failed or were rate-limited."
                 )
-            filtered = _filter_publication_text(relevance_query, fallback, max_results) if fallback else ""
+            filtered = (
+                _filter_publication_text(
+                    relevance_query,
+                    fallback,
+                    max_results,
+                    _collector=_collector,
+                    _executed_query=_arxiv_executed_query,
+                )
+                if fallback
+                else ""
+            )
             if not filtered:
                 return _publication_partial(
                     "Semantic Scholar returned 429 and Crossref/AlphaXiv/ArXiv fallbacks yielded no usable relevant records.",
@@ -1128,10 +1232,17 @@ async def publications_search(
                     f"Semantic Scholar failed ({exc}); AlphaXiv supplied partial relevant records.",
                     clean_output("\n\n".join(block for _score, block in selected_blocks)),
                 )
-            fallback = await arxiv_search(query, max_results)
+            _arxiv_executed_query = query
+            fallback = await arxiv_search(_arxiv_executed_query, max_results)
             if _looks_failed(fallback):
                 return _publication_failure(f"Semantic Scholar failed ({exc}) and Crossref/ArXiv fallbacks also failed or were rate-limited.")
-            filtered = _filter_publication_text(query, fallback, max_results)
+            filtered = _filter_publication_text(
+                query,
+                fallback,
+                max_results,
+                _collector=_collector,
+                _executed_query=_arxiv_executed_query,
+            )
             if not filtered:
                 if _looks_failed(str(exc)):
                     return _publication_failure(f"Semantic Scholar failed ({exc}) and Crossref/ArXiv fallbacks returned no usable relevant records.")

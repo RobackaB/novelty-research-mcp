@@ -18,6 +18,7 @@ from bs4 import BeautifulSoup
 from ._ttl_cache import TTLCache
 from .output_cleaner import USER_AGENT, trim_words
 from .patent_filters import extract_patent_number
+from .decision_capture import safe_record
 from .relevance import build_corpus_idf, discriminative_tokens, evidence_score, tokens
 from .result_contract import NormalizedResult
 
@@ -124,7 +125,24 @@ def _normalize_title_dedupe_key(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).strip()
 
 
-def _dedupe(candidates: list[PatentCandidate]) -> list[PatentCandidate]:
+def _origin_of(
+    origins: dict[int, tuple[str, str]] | None, candidate: PatentCandidate
+) -> tuple[str, str]:
+    """Return (provider, executed_variant) for this candidate occurrence.
+
+    Empty strings when the origin is unknown: a missing origin is recorded as
+    missing rather than substituted with the normalised query, which would
+    misreport which provider call actually produced the candidate.
+    """
+    if not origins:
+        return ("", "")
+    return origins.get(id(candidate), ("", ""))
+
+
+def _dedupe(
+    candidates: list[PatentCandidate], *, _collector: Any = None, _decision_query: str = "",
+    _origins: dict[int, tuple[str, str]] | None = None,
+) -> list[PatentCandidate]:
     """Remove duplicate patent candidates by number, title or URL.
 
     The same application turns up in one result set under several publication
@@ -138,9 +156,38 @@ def _dedupe(candidates: list[PatentCandidate]) -> list[PatentCandidate]:
     for candidate in candidates:
         key = _normalize_patent_dedupe_key(candidate.patent_number) or candidate.url
         if not key or key in seen:
+            # Structural, not a relevance verdict: retained stays NULL.
+            safe_record(
+                _collector,
+                decision_stage="dedupe",
+                decision_reason="duplicate_of",
+                title=candidate.title,
+                canonical_id=candidate.patent_number,
+                url=candidate.url,
+                score_text=f"{candidate.title} {candidate.snippet}",
+                decision_query=_decision_query,
+                query_variant=_origin_of(_origins, candidate)[1],
+                provider=_origin_of(_origins, candidate)[0]
+                or (getattr(candidate, "provider", "") or ""),
+                payload={"duplicate_key": key},
+            )
             continue
         title_key = _normalize_title_dedupe_key(candidate.title)
         if title_key and len(title_key) >= 12 and title_key in seen_titles:
+            safe_record(
+                _collector,
+                decision_stage="dedupe",
+                decision_reason="duplicate_of",
+                title=candidate.title,
+                canonical_id=candidate.patent_number,
+                url=candidate.url,
+                score_text=f"{candidate.title} {candidate.snippet}",
+                decision_query=_decision_query,
+                query_variant=_origin_of(_origins, candidate)[1],
+                provider=_origin_of(_origins, candidate)[0]
+                or (getattr(candidate, "provider", "") or ""),
+                payload={"duplicate_title_key": title_key},
+            )
             continue
         seen.add(key)
         if title_key:
@@ -442,6 +489,9 @@ def _rank(
     candidates: list[PatentCandidate],
     limit: int,
     allow_low_confidence: bool = False,
+    *,
+    _collector: Any = None,
+    _origins: dict[int, tuple[str, str]] | None = None,
 ) -> tuple[list[PatentCandidate], float]:
     """Score the candidates and return the most relevant results."""
     # Term rarity is computed over the whole candidate set, so terms common to
@@ -455,7 +505,27 @@ def _rank(
     # technical vocabulary could pass even the main threshold. Term-rarity
     # weighting does not catch this when all candidates come from one patent
     # family and therefore share the same term frequencies.
-    on_topic = [c for c in candidates if _shares_discriminative_term(query, c)]
+    on_topic = []
+    for c in candidates:
+        anchored = _shares_discriminative_term(query, c)
+        # Non-numeric gate. A patent rejected here may have scored above the
+        # threshold, so the reason must not claim it was below it.
+        safe_record(
+            _collector,
+            decision_stage="domain_anchor",
+            decision_reason="accepted" if anchored else "no_discriminative_term",
+            title=c.title,
+            canonical_id=c.patent_number,
+            url=c.url,
+            score_text=f"{c.title} {c.snippet}",
+            decision_query=query,
+            query_variant=_origin_of(_origins, c)[1],
+            provider=_origin_of(_origins, c)[0] or (getattr(c, "provider", "") or ""),
+            score_at_decision=c.score,
+            retained=anchored,
+        )
+        if anchored:
+            on_topic.append(c)
     primary = [
         candidate
         for candidate in on_topic
@@ -481,7 +551,50 @@ def _rank(
         ranked = [candidate for candidate in on_topic if candidate.score >= MIN_RELEVANCE_FLOOR]
     else:
         ranked = []
+    kept_ids = {id(c) for c in ranked}
+    for candidate in on_topic:
+        if id(candidate) in kept_ids:
+            continue
+        # Passed the domain anchor but not the score gate. threshold_used names
+        # which of the three tiers was in force.
+        safe_record(
+            _collector,
+            decision_stage="threshold_filter",
+            decision_reason="below_threshold",
+            title=candidate.title,
+            canonical_id=candidate.patent_number,
+            url=candidate.url,
+            score_text=f"{candidate.title} {candidate.snippet}",
+            decision_query=query,
+            query_variant=_origin_of(_origins, candidate)[1],
+            provider=_origin_of(_origins, candidate)[0]
+            or (getattr(candidate, "provider", "") or ""),
+            score_at_decision=candidate.score,
+            threshold_at_decision=threshold_used,
+            retained=False,
+        )
     sorted_ranked = sorted(ranked, key=lambda item: (-item.score, item.patent_number))[:limit]
+    surviving = {id(c) for c in sorted_ranked}
+    for candidate in ranked:
+        if id(candidate) in surviving:
+            continue
+        # Structural: removed by the display limit, not by a relevance verdict,
+        # so retained stays NULL.
+        safe_record(
+            _collector,
+            decision_stage="truncation",
+            decision_reason="beyond_limit",
+            title=candidate.title,
+            canonical_id=candidate.patent_number,
+            url=candidate.url,
+            score_text=f"{candidate.title} {candidate.snippet}",
+            decision_query=query,
+            query_variant=_origin_of(_origins, candidate)[1],
+            provider=_origin_of(_origins, candidate)[0]
+            or (getattr(candidate, "provider", "") or ""),
+            score_at_decision=candidate.score,
+            payload={"limit": int(limit)},
+        )
     return sorted_ranked, threshold_used
 
 
@@ -506,13 +619,25 @@ def _patent_query_variants(normalized_query: str, max_variants: int = 3) -> list
     return variants[: max(1, max_variants)]
 
 
-async def patent_search(query: str, max_results: int = 10) -> str:
+async def patent_search(query: str, max_results: int = 10, *, _collector: Any = None) -> str:
     """Search for patent results across the available providers."""
     normalized_query = _normalize_query(query)
     search_query = _provider_query(normalized_query)
     limit = max(1, min(max_results, MAX_RESULTS_CAP))
     cache_key = (normalized_query, limit)
     cached = _PATENT_SEARCH_CACHE.get(cache_key)
+    # Invocation-level reuse marker. The TTL cache is preserved exactly: a warm
+    # call still returns the cached bytes and calls no provider. This event lets
+    # the dataset builder tell "reused an earlier trace" from "searched and found
+    # nothing", which are otherwise indistinguishable from an empty event set.
+    safe_record(
+        _collector,
+        decision_stage="cache_lookup",
+        decision_reason="cache_hit" if cached is not None else "cache_miss",
+        decision_query=normalized_query,
+        dataset_eligible=False,
+        payload={"cache_key": str(cache_key)},
+    )
     if cached is not None:
         LOGGER.info("patent_search cache_hit query=%r max_results=%s", normalized_query[:200], limit)
         return cached
@@ -532,6 +657,8 @@ async def patent_search(query: str, max_results: int = 10) -> str:
     wipo_variants = _patent_query_variants(_wipo_query(normalized_query), max_variants=3)
 
     completed_providers: list[str] = []
+
+    candidate_origins: dict[int, tuple[str, str]] = {}
 
     async def _run_provider_variant(provider_name: str, provider, variant: str):
         """Run one provider with one query variant and capture any errors."""
@@ -559,6 +686,13 @@ async def patent_search(query: str, max_results: int = 10) -> str:
             slot = provider_status.setdefault(provider_name, {"ok": 0, "unavailable": 0, "error": 0})
             slot[status] += 1
             if status == "ok":
+                # Capture-only origin map. Keyed by object identity because the
+                # same document can arrive from several providers or variants and
+                # must keep the origin of THIS occurrence. Nothing here reaches
+                # candidate serialization, and a missing origin stays empty rather
+                # than being replaced by a guessed query.
+                for _candidate in payload:
+                    candidate_origins[id(_candidate)] = (provider_name, variant)
                 all_candidates.extend(payload)
             elif status == "unavailable":
                 LOGGER.info("patent_search provider=%s skipped: %s", provider_name, payload)
@@ -580,8 +714,12 @@ async def patent_search(query: str, max_results: int = 10) -> str:
                     unavailable_primary_count += 1
                 notes.append(f"{provider_name} not configured for this run.")
 
-    deduped_candidates = _dedupe(all_candidates)
-    ranked, threshold_used = _rank(normalized_query, deduped_candidates, limit)
+    deduped_candidates = _dedupe(all_candidates, _collector=_collector, _decision_query=normalized_query,
+        _origins=candidate_origins)
+    ranked, threshold_used = _rank(
+        normalized_query, deduped_candidates, limit, _collector=_collector,
+        _origins=candidate_origins,
+    )
     threshold_note = (
         f"Patent rerank threshold used: {threshold_used:.2f}"
         + (
