@@ -8,6 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Every release keeps the 7 MCP tool interfaces (names, parameters, response shape)
 compatible with the exported Flowise architecture.
 
+## [0.9.7] Documentation translated to English, Slovak localisation corrected
+
+### Changed
+
+- All documentation-only source prose is now in English. Roughly 500 docstrings and comments were translated across the scoring and query core, `research_session.py`, the rendering layer, the three evidence packs, the patent provider, the web and publication providers, the fetch and verify layer, the remaining `tools/` modules, the runtime entry points, `.env.example`, the evaluation harness, the test suite, and `AUDIT.md`. `README.sk.md` remains the intentionally Slovak documentation file; behaviour-carrying, localisation and fixture strings listed below are preserved deliberately.
+- Terminology was aligned while translating: "final answer" for the generated output, "report" for the rendered research artefact, and "user answer" only where it names `research_session_user_answer`.
+
+### Fixed
+
+- Three localisation defects in Slovak report output. The per-requirement table header was a hardcoded English literal, the missing-label fallback was hardcoded `"(unspecified)"`, and the not-fully-verified prefix was written without diacritics though the status words directly above it had them — a Slovak report carried five English fragments. The header and the fallback now come from `_section_labels`. English output is unchanged. That code path had no test coverage at all; the added tests assert the absence of English fragments rather than the presence of specific Slovak strings, so they also catch any unlocalised field added there later.
+
+### Verification methodology
+
+- **Stripped-AST equivalence.** Documentation-only Python translation chunks were verified by stripping docstrings from both versions and comparing AST dumps. Comments never reach the AST, so identical stripped trees prove no executable code, constant, regex or vocabulary set changed in those chunks. The test-suite assertion-message changes used the narrower exceptions documented below.
+- **String-literal diff.** For the test suite, every non-docstring string constant was enumerated in both versions; each changed literal had to appear in a closed list of 14 approved assertion messages, and fixture, query and expected-output strings had to be byte-identical.
+- **Enumerated f-string exception.** Two assertion messages in `test_relevance_quality.py` are f-strings, which the main verifier deliberately refuses to normalise. A separate check proves those are the only `JoinedStr` differences anywhere in `tests/`, that their `entry['id']` interpolation is unchanged, and that no other f-string differs.
+- **Byte-identical checks** for the 7 MCP tool descriptions and the 86 `terminal_ui.py` string literals.
+- **Numeric integrity** for `AUDIT.md`: every numeric token was compared before and after. No value was added or removed. Historical test counts (126, 145, 159, 166, 189, 217, 229, 243, 258, 266, 270) and all measured precision/recall/F1 figures are preserved exactly, not modernised to the current count.
+- **Negative controls.** The two custom test-suite string verifiers were tested against deliberate violations before their passing results were trusted. Two verifier bugs were found and fixed while developing these checks: sorting string constants by `(lineno, value)` misaligned the positional comparison whenever a value changed, and the assumed static-parts shape of an f-string was wrong.
+
+### Preserved deliberately
+
+Slovak that is data or interface, not documentation, is unchanged:
+
+- `STOPWORDS` in `relevance.py` and `QUERY_FILLER_RE` in `publications_search.py` — Slovak stopwords used to tokenise Slovak-language queries.
+- `_GENERIC_HEAD_NOUNS` and the query-stripping regexes in `research_session.py` — Slovak vocabulary and meta-question patterns.
+- The `_section_labels` table in `user_answer.py` and every `language == "sk"` branch — intentional user-facing localisation.
+- The 7 `@mcp.tool()` docstrings in `server.py` — **behaviour-carrying protocol text**. FastMCP transmits them verbatim as MCP tool descriptions to the Flowise LLM, so translating them would change the prompt the model sees. A separate behaviour-change candidate, with routing evidence and regression tests, is deferred.
+- The `terminal_ui.py` startup banner — user-facing runtime localisation, asserted by existing tests.
+- 13 Slovak literals in `tests/` — fixtures, query-language inputs, expected Slovak output, and the deliberate negative assertion that the old localisation bug is gone.
+
 ## [0.9.6] Iteration-order audit and a standing determinism guard
 
 ### Added
