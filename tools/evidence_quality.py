@@ -74,6 +74,16 @@ def hit_quality_score(hit: dict[str, Any], source_type: str = "") -> float:
     return round(max(0.0, min(base, 10.0)), 2)
 
 
+def _identity_key(hit: dict[str, Any]) -> tuple[str, str, str, str]:
+    """Return a stable identity tuple used only to break equal quality scores."""
+    return (
+        str(hit.get("canonical_id") or "").strip().casefold(),
+        str(hit.get("url") or "").strip().casefold(),
+        str(hit.get("title") or "").strip().casefold(),
+        str(hit.get("evidence_level") or "").strip().casefold(),
+    )
+
+
 def grade_source(source: dict[str, Any] | None, source_type: str = "") -> dict[str, Any]:
     """Grade one source's quality without exposing the raw evidence."""
     if not source:
@@ -104,7 +114,20 @@ def grade_source(source: dict[str, Any] | None, source_type: str = "") -> dict[s
         }
 
     exact_candidate = any(hit.get("exact_combination_candidate_found") is True for hit in hits)
-    scored_hits = sorted(((hit_quality_score(hit, source_type), hit) for hit in hits), reverse=True, key=lambda item: item[0])
+    # Sorting by score alone left equal-scoring hits in the caller's list order,
+    # and top_hit decides the returned top_evidence_level. A hit carrying an
+    # explicit relevance_score skips the evidence-level multiplier, so two hits
+    # can score identically while differing in evidence level; reversing the
+    # caller's list then changed the reported level.
+    #
+    # _identity_key is a deterministic secondary key, not a ranking. Its final
+    # component is evidence_level purely so the tuple stays total when the other
+    # fields are absent -- lexicographic order there implies nothing about which
+    # evidence level is stronger.
+    scored_hits = sorted(
+        ((hit_quality_score(hit, source_type), hit) for hit in hits),
+        key=lambda item: (-item[0], _identity_key(item[1])),
+    )
     top_score, top_hit = scored_hits[0]
     levels = {str(hit.get("evidence_level") or "unverified").strip().lower() for hit in hits}
     strong_hit = any(
