@@ -618,6 +618,27 @@ def _unsupported_fetch(reason: str, url: str) -> str:
         "EVIDENCE_LEVEL: FETCH_FAILED",
     ])
 
+def _ordered_results(
+    merged_results: dict[str, tuple[str, str, str, float]], max_results: int
+) -> list[tuple[str, str, str, float]]:
+    """Order merged web results and cut them to the display limit.
+
+    The key was previously (-score, _rank_domain(url)). Since _rank_domain
+    returns (rank, domain), two different URLs on the same domain with the same
+    score produced an identical key and fell through to dict insertion order,
+    which decided both the displayed order and, at the cut boundary, which
+    results survived at all.
+
+    The URL is appended as a final component. merged_results is keyed by URL, so
+    the URL is unique by construction and the key is therefore total: no two
+    entries can compare equal. It is an identity component, not a ranking one.
+    """
+    return sorted(
+        merged_results.values(),
+        key=lambda row: (-row[3], _rank_domain(row[0]), row[0]),
+    )[: max(1, min(max_results, 10))]
+
+
 async def web_search(query: Any, max_results: int = 5) -> str:
     """Search for web results and return cleaned records."""
     try:
@@ -726,10 +747,7 @@ async def web_search(query: Any, max_results: int = 5) -> str:
                     )
                 if rescored:
                     merged_results = rescored
-            ranked = sorted(
-                merged_results.values(),
-                key=lambda row: (-row[3], _rank_domain(row[0])),
-            )[: max(1, min(max_results, 10))]
+            ranked = _ordered_results(merged_results, max_results)
             text = "\n\n".join(
                 "\n".join(
                     [
