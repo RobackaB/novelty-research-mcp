@@ -112,7 +112,7 @@ def test_all_recorded_stages_and_reasons_are_in_the_closed_enums():
 
 # --- capture at the real hooks ------------------------------------------------
 
-def test_publication_threshold_rejection_is_captured_with_exact_fields():
+def test_publication_overlap_rejection_is_captured_with_exact_fields():
     c = _collector()
     query = "anomaly detection in application logs"
     text = "Seismic wave classification using supervised learning for earthquakes."
@@ -121,11 +121,11 @@ def test_publication_threshold_rejection_is_captured_with_exact_fields():
     assert rejects, f"no rejection captured: {c.events}"
     event = rejects[0]
     assert event["decision_stage"] == "provider_filter"
-    assert event["decision_reason"] == "below_threshold"
+    assert event["decision_reason"] == "below_overlap_gate"
     assert event["score_text"] == text
     assert event["decision_query"] == query
-    assert event["threshold_at_decision"] == pubs.MIN_PUBLICATION_RELEVANCE_SCORE
-    assert isinstance(event["score_at_decision"], float)
+    assert event["threshold_at_decision"] is None
+    assert event["score_at_decision"] is None
     assert event["attempt"] == 2 and event["session_id"] == "s1"
 
 

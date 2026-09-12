@@ -15,25 +15,19 @@ def _candidate(number: str, title: str, snippet: str) -> patent_search.PatentCan
     )
 
 
-def test_patent_threshold_filter_hook_exists_but_has_no_behavioural_control():
-    """KNOWN GAP: threshold_filter is wired but not behaviourally proven.
-
-    A behavioural test needs a candidate that clears _shares_discriminative_term
-    yet scores below MIN_RELEVANCE_SCORE (2.8). Corpus IDF weighting inflates
-    sparse candidates -- the weakest fixture tried still scored 4.38 -- so no such
-    fixture was found. Rather than a conditional assertion that passes when the
-    hook is removed, the gap is recorded here and in the coverage matrix.
-
-    What IS asserted: the anchor stage is always recorded, so the surrounding
-    instrumentation is live.
-    """
-    strong = _candidate("US1B2", "Smart door lock mobile application",
-                        "Smart door lock controlled by a mobile application with access codes.")
+def test_patent_threshold_rejection_records_the_real_score_and_evaluated_tiers():
+    """A real sparse candidate clears the anchor but fails both score tiers."""
+    weak = _candidate("US1B2", "lock", "")
     collector = DecisionCollector(context=CollectorContext(source_type="patent"))
-    patent_search._rank(QUERY, [strong], 6, _collector=collector)
+    ranked, _ = patent_search._rank(QUERY, [weak], 6, _collector=collector)
+    assert ranked == []
     anchors = [e for e in collector.events if e["decision_stage"] == "domain_anchor"]
     assert anchors, "anchor stage must always be recorded"
     assert anchors[0]["retained"] is True
+    rejected = [e for e in collector.events if e["decision_stage"] == "threshold_filter"]
+    assert [(e["threshold_at_decision"], e["score_at_decision"], e["retained"])
+            for e in rejected] == [(2.8, 1.4, False), (2.2, 1.4, False)]
+    assert all(e["score_text"] == "lock " for e in rejected)
 
 
 def test_patent_truncation_is_structural():

@@ -22,9 +22,13 @@ Safety contract, relied on by the tests:
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import unicodedata
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Final
 
@@ -57,12 +61,14 @@ DECISION_REASONS: Final[frozenset[str]] = frozenset(
         "below_threshold",
         "no_discriminative_term",
         "low_value_url",
+        "url_policy_rejected",
         "error_page",
         "duplicate_of",
         "discarded_duplicate_url",
         "below_overlap_gate",
         "beyond_limit",
         "restored_to_meet_minimum",
+        "restored_after_empty_rerank",
         "relaxed_threshold_applied",
         "floor_applied",
         "cache_hit",
@@ -232,6 +238,8 @@ class DecisionCollector:
         decision_reason: str,
         score_text: str = "",
         title: str = "",
+        identity_title: str | None = None,
+        identity_score_text: str | None = None,
         canonical_id: str = "",
         url: str = "",
         decision_query: str = "",
@@ -249,7 +257,9 @@ class DecisionCollector:
         if decision_reason not in DECISION_REASONS:
             raise ValueError(f"unknown decision_reason: {decision_reason!r}")
         identity, identity_kind = candidate_identity(
-            canonical_id=canonical_id, url=url, title=title, score_text=score_text
+            canonical_id=canonical_id, url=url,
+            title=title if identity_title is None else identity_title,
+            score_text=score_text if identity_score_text is None else identity_score_text,
         )
         # `retained` is meaningful only where a keep/reject decision happened.
         # Structural events (dedupe, merge collision, truncation) leave it NULL
@@ -290,7 +300,12 @@ class DecisionCollector:
                 # marker headers, cache-lookup observations. The trace is kept,
                 # but the dataset builder must never offer these for labelling.
                 "dataset_eligible": bool(dataset_eligible),
-                "payload": dict(payload) if isinstance(payload, dict) else None,
+                # A recursive JSON snapshot prevents later nested mutations
+                # from rewriting captured provenance or retaining live objects.
+                "payload": (
+                    json.loads(json.dumps(payload, ensure_ascii=False, allow_nan=False))
+                    if isinstance(payload, dict) else None
+                ),
             }
         )
 
@@ -306,5 +321,31 @@ def safe_record(collector: Any, **fields: Any) -> None:
         return
     try:
         collector.record(**fields)
-    except Exception:  # noqa: BLE001 - capture must never surface to the caller
-        LOGGER.debug("decision capture failed; retrieval is unaffected", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 - capture must never surface to the caller
+        _warn_capture_failure(LOGGER, "decision capture failed; retrieval is unaffected", exc)
+
+
+def _warn_capture_failure(logger: logging.Logger, message: str, error: Exception) -> None:
+    """Warn without exposing request data or letting a broken handler escape."""
+    try:
+        logger.warning("%s (%s)", message, type(error).__name__)
+    except Exception:  # noqa: BLE001 - diagnostics must remain fail-open
+        pass
+
+
+@contextmanager
+def capture_scope(variable: ContextVar[Any], value: Any) -> Iterator[None]:
+    """Scope optional instrumentation without changing the body's exceptions."""
+    token = None
+    try:
+        token = variable.set(value)
+    except Exception as exc:  # noqa: BLE001 - capture setup is diagnostic only
+        _warn_capture_failure(LOGGER, "decision capture context setup failed", exc)
+    try:
+        yield
+    finally:
+        if token is not None:
+            try:
+                variable.reset(token)
+            except Exception as exc:  # noqa: BLE001 - preserve the retrieval outcome
+                _warn_capture_failure(LOGGER, "decision capture context reset failed", exc)

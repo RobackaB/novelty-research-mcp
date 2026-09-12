@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
+from contextvars import ContextVar
 from typing import Any
 
 import httpx
@@ -13,8 +15,11 @@ import httpx
 from .alphaxiv_client import discover_papers as alphaxiv_discover_papers
 from .arxiv_search import arxiv_search
 from .output_cleaner import USER_AGENT, clean_output, format_error, trim_words
-from .decision_capture import safe_record
-from .relevance import _MIN_CORPUS_FOR_IDF, build_corpus_idf, evidence_score, is_relevant, tokens
+from .decision_capture import _warn_capture_failure, capture_scope, safe_record
+from .relevance import (
+    _MIN_CORPUS_FOR_IDF, build_corpus_idf, discriminative_tokens, evidence_score,
+    is_relevant, salient_query_tokens, subject_anchors, tokens,
+)
 from .result_contract import NormalizedResult, prepend_markers
 from .search_bounds import section_query_variants
 
@@ -40,6 +45,124 @@ QUERY_FILLER_RE = re.compile(
     r"je|su|sú|sa|na|do|vo|ako|the|that|this)\b",
     flags=re.I,
 )
+
+LOGGER = logging.getLogger(__name__)
+# A task-local sidecar retains the origin of formatted blocks without changing
+# provider return values. Only capture helpers read it; ranking never does.
+_PUBLICATION_CAPTURE: ContextVar[Any] = ContextVar("publication_capture", default=None)
+
+
+def _publication_capture_fields(block: str, title: str = "", url: str = "") -> dict[str, str]:
+    """Derive a stable document identity without changing scored/rendered text."""
+    title_match = _TITLE_BLOCK_RE.search(block)
+    title = title or (title_match.group(1).strip() if title_match else "")
+    url = url.rstrip(".,;") if url.startswith("http") else ""
+    # Only document metadata identifies the paper. A citation URL inside the
+    # scored abstract must never become the candidate's own identity.
+    urls = [url] if url else re.findall(
+        r"^(?:DOI|AlphaXiv|PubMed|OpenAlex|Semantic Scholar|ArXiv) URL[^:\n]*:\s*(https?://[^\s<>]+)",
+        block, flags=re.I | re.M,
+    )
+    urls = [value.rstrip(".,;") for value in urls if value.startswith("http")]
+    canonical_id = ""
+    for value in urls:
+        doi = re.search(r"https?://(?:dx\.)?doi\.org/(.+)", value, re.I)
+        if doi:
+            canonical_id = "doi:" + doi.group(1).lower()
+            url = value
+            break
+    if not canonical_id:
+        for value in urls:
+            arxiv = re.search(r"(?:arxiv|alphaxiv)\.org/(?:abs|pdf|overview)/((?:\d{4}\.\d{4,5}|[a-z.-]+/\d{7}))(?:v\d+)?", value, re.I)
+            if arxiv:
+                canonical_id = "arxiv:" + arxiv.group(1).lower()
+                url = value
+                break
+    return {"title": title, "url": url or (urls[0] if urls else ""), "canonical_id": canonical_id}
+
+
+def _remember_publication(
+    block: str, provider: str, executed_query: str, *,
+    identity_title: str | None = None, identity_score_text: str | None = None,
+) -> None:
+    """Remember the first origin of this exact block, for later capture only."""
+    try:
+        state = _PUBLICATION_CAPTURE.get()
+        if state is not None:
+            fields = _publication_capture_fields(block)
+            fields.update(provider=provider, query_variant=executed_query)
+            if identity_score_text is not None:
+                fields.update(identity_title=identity_title, identity_score_text=identity_score_text)
+            state[1].setdefault(block, fields)
+    except Exception as exc:
+        _warn_capture_failure(LOGGER, "publication capture provenance failed; retrieval is unaffected", exc)
+
+
+def _capture_publication(collector: Any = None, *, block: str, **fields: Any) -> None:
+    """Guard field extraction as well as recording, so capture remains fail-open."""
+    try:
+        state = _PUBLICATION_CAPTURE.get()
+        sink = collector if collector is not None else (state[0] if state is not None else None)
+        if sink is None:
+            return
+        metadata = _publication_capture_fields(block, fields.pop("title", ""), fields.pop("url", ""))
+        if state is not None:
+            metadata.update(state[1].get(block, {}))
+        metadata.setdefault("provider", _extract_block_provider(block))
+        metadata.setdefault("query_variant", "")
+        idf = fields.pop("_capture_idf", None)
+        reconstruct_score = fields.pop("_reconstruct_score", False)
+        if fields.get("decision_stage") in {"provider_filter", "merged_rerank"}:
+            fields["decision_reason"] = _publication_rejection_reason(
+                fields.get("decision_query", ""), block, fields.get("retained", False), idf
+            )
+            if fields["decision_reason"] in {"below_overlap_gate", "no_discriminative_term"}:
+                fields["threshold_at_decision"] = None
+            elif reconstruct_score:
+                fields["score_at_decision"] = evidence_score(
+                    fields.get("decision_query", ""), block, "PUBLICATION", idf=idf
+                )
+        metadata.update(fields)
+        safe_record(sink, score_text=block, dataset_eligible=not _is_marker_header_block(block), **metadata)
+    except Exception as exc:
+        _warn_capture_failure(LOGGER, "publication decision capture failed; retrieval is unaffected", exc)
+
+
+def _publication_rejection_reason(query: str, block: str, keep: bool, idf: dict[str, float] | None = None) -> str:
+    """Describe the first failed is_relevant gate, without rescoring candidates."""
+    if keep:
+        return "accepted"
+    text_tokens = tokens(block)
+    query_tokens = tokens(query)
+    required_shared = 3 if len(query_tokens) >= 6 else 2
+    if len(query_tokens) >= 4 and len(query_tokens & text_tokens) < required_shared:
+        return "below_overlap_gate"
+    discriminators = discriminative_tokens(query)
+    if discriminators:
+        required = min(len(discriminators), max(2, min(3, (len(discriminators) + 1) // 2)))
+        if len(discriminators & text_tokens) < required:
+            return "no_discriminative_term"
+    anchors = subject_anchors(discriminators)
+    if anchors and not (anchors & text_tokens):
+        return "no_discriminative_term"
+    if not anchors and discriminators and not (discriminators & text_tokens):
+        return "no_discriminative_term"
+    if idf:
+        salient = salient_query_tokens(query, idf)
+        if salient and not (salient & text_tokens):
+            return "no_discriminative_term"
+    return "below_threshold"
+
+
+def _capture_selection(blocks: list[tuple[float, str]], limit: int, query: str) -> None:
+    """Trace final selection, including candidates dropped only by the limit."""
+    for index, (score, block) in enumerate(blocks):
+        _capture_publication(
+            block=block, decision_stage="truncation",
+            decision_reason="accepted" if index < limit else "beyond_limit",
+            decision_query=query, score_at_decision=score,
+            payload={"rank": index + 1, "limit": limit},
+        )
 
 
 def _relevant_abstract_excerpt(abstract: str, query: str, max_words: int = ABSTRACT_WORD_LIMIT) -> str:
@@ -132,21 +255,22 @@ def _is_marker_header_block(block: str) -> bool:
 
 def _record_provider_gate(
     collector: Any, *, block: str, query: str, executed_query: str, provider: str,
-    score: float, keep: bool,
+    score: float, keep: bool, title: str = "", url: str = "",
+    identity_score_text: str | None = None,
 ) -> None:
     """Record one provider-level relevance gate. Passive; never affects filtering."""
-    safe_record(
+    _capture_publication(
         collector,
         decision_stage="provider_filter",
         decision_reason="accepted" if keep else "below_threshold",
-        score_text=block,
+        block=block, title=title, url=url,
+        identity_score_text=identity_score_text,
         decision_query=query,
         query_variant=executed_query,
         provider=provider,
         score_at_decision=score,
         threshold_at_decision=MIN_PUBLICATION_RELEVANCE_SCORE,
         retained=keep,
-        dataset_eligible=not _is_marker_header_block(block),
     )
 
 
@@ -162,14 +286,16 @@ def _filter_publication_text(
     blocks = [block.strip() for block in re.split(r"\n\s*\n", text or "") if block.strip()]
     ranked: list[tuple[float, str]] = []
     for block in blocks:
-        block_score = evidence_score(query, block, "PUBLICATION")
         keep = is_relevant(query, block, "PUBLICATION", threshold=MIN_PUBLICATION_RELEVANCE_SCORE)
+        # Preserve baseline short-circuiting: rejected overlap/anchor blocks
+        # were never scored here. Diagnostic reconstruction is guarded below.
+        block_score = evidence_score(query, block, "PUBLICATION") if keep else None
         # Passive capture. safe_record cannot raise, and nothing below reads it.
-        safe_record(
+        _capture_publication(
             _collector,
             decision_stage="provider_filter",
             decision_reason="accepted" if keep else "below_threshold",
-            score_text=block,
+            block=block,
             # decision_query is the scorer's input. query_variant is the query a
             # provider actually executed, which in the fallback branches is the
             # ArXiv argument, not the joined scoring query. Substituting the
@@ -180,11 +306,18 @@ def _filter_publication_text(
             score_at_decision=block_score,
             threshold_at_decision=MIN_PUBLICATION_RELEVANCE_SCORE,
             retained=keep,
-            dataset_eligible=not _is_marker_header_block(block),
+            _reconstruct_score=not keep,
         )
         if keep:
             ranked.append((block_score, block))
     ranked.sort(key=lambda item: item[0], reverse=True)
+    for index, (score, block) in enumerate(ranked):
+        _capture_publication(
+            _collector, block=block, decision_stage="truncation",
+            decision_reason="accepted" if index < max(1, min(max_results, 20)) else "beyond_limit",
+            decision_query=query, score_at_decision=score,
+            query_variant=query if _executed_query is None else _executed_query,
+        )
     return "\n\n".join(block for _score, block in ranked[:max(1, min(max_results, 20))])
 
 
@@ -241,7 +374,7 @@ def _alpha_url(item: dict[str, object]) -> str:
     return ""
 
 
-def _format_alpha_item(item: dict[str, object], relevance_query: str) -> tuple[float, str] | None:
+def _format_alpha_item(item: dict[str, object], relevance_query: str, *, _executed_query: str = "") -> tuple[float, str] | None:
     """Convert one AlphaXiv item into a scored text block."""
     title = str(item.get("title") or item.get("paperTitle") or item.get("name") or "").strip()
     if not title:
@@ -280,7 +413,11 @@ def _format_alpha_item(item: dict[str, object], relevance_query: str) -> tuple[f
     author_label = "Organizations listed for this publication result" if is_organizations else "Authors listed for this publication result"
     score_text = f"{title} {abstract}"
     score = evidence_score(relevance_query, score_text, "PUBLICATION")
-    if not is_relevant(relevance_query, score_text, "PUBLICATION", threshold=MIN_PUBLICATION_RELEVANCE_SCORE):
+    keep = is_relevant(relevance_query, score_text, "PUBLICATION", threshold=MIN_PUBLICATION_RELEVANCE_SCORE)
+    _record_provider_gate(None, block=score_text, query=relevance_query,
+                          executed_query=_executed_query, provider="alphaxiv",
+                          score=score, keep=keep, title=title, url=url)
+    if not keep:
         return None
     lines = [
         f"Publication title returned by AlphaXiv: **{title}**.",
@@ -295,10 +432,13 @@ def _format_alpha_item(item: dict[str, object], relevance_query: str) -> tuple[f
         f"Local rerank score for this publication: {score}/10.",
         "SOURCE: AlphaXiv",
     ])
-    return score, "\n".join(lines)
+    block = "\n".join(lines)
+    _remember_publication(block, "alphaxiv", _executed_query,
+                          identity_title=title, identity_score_text=score_text)
+    return score, block
 
 
-def _alpha_text_blocks(output: str, relevance_query: str, max_results: int) -> list[tuple[float, str]]:
+def _alpha_text_blocks(output: str, relevance_query: str, max_results: int, *, _executed_query: str = "") -> list[tuple[float, str]]:
     """Process textual AlphaXiv output into scored publication blocks."""
     blocks: list[tuple[float, str]] = []
     for raw_block in [block.strip() for block in re.split(r"\n\s*\n", output or "") if block.strip()]:
@@ -310,7 +450,12 @@ def _alpha_text_blocks(output: str, relevance_query: str, max_results: int) -> l
         title = re.sub(r"\s+", " ", title_match.group(1)).strip(" *.:-")
         abstract = re.sub(r"\s+", " ", abstract_match.group(1)).strip() if abstract_match else raw_block
         score = evidence_score(relevance_query, f"{title} {abstract}", "PUBLICATION")
-        if not is_relevant(relevance_query, f"{title} {abstract}", "PUBLICATION", threshold=MIN_PUBLICATION_RELEVANCE_SCORE):
+        keep = is_relevant(relevance_query, f"{title} {abstract}", "PUBLICATION", threshold=MIN_PUBLICATION_RELEVANCE_SCORE)
+        _record_provider_gate(None, block=f"{title} {abstract}", query=relevance_query,
+                              executed_query=_executed_query, provider="alphaxiv",
+                              score=score, keep=keep, title=title,
+                              url=url_match.group(0) if url_match else "")
+        if not keep:
             continue
         lines = [
             f"Publication title returned by AlphaXiv: **{title}**.",
@@ -322,7 +467,10 @@ def _alpha_text_blocks(output: str, relevance_query: str, max_results: int) -> l
             f"Local rerank score for this publication: {score}/10.",
             "SOURCE: AlphaXiv",
         ])
-        blocks.append((score, "\n".join(lines)))
+        block = "\n".join(lines)
+        _remember_publication(block, "alphaxiv", _executed_query,
+                              identity_title=title, identity_score_text=f"{title} {abstract}")
+        blocks.append((score, block))
         if len(blocks) >= max_results:
             break
     return blocks
@@ -339,13 +487,17 @@ async def _alpha_search_blocks(search_queries: list[str], relevance_query: str, 
         for raw_item in items:
             if isinstance(raw_item, dict):
                 for item in _iter_alpha_items(raw_item):
-                    formatted = _format_alpha_item(item, relevance_query)
+                    formatted = _format_alpha_item(item, relevance_query, _executed_query=search_query)
                     if formatted:
                         parsed_blocks.append(formatted)
             elif isinstance(raw_item, str) and raw_item.strip():
-                parsed_blocks.extend(_alpha_text_blocks(raw_item, relevance_query, max_results))
+                parsed_blocks.extend(_alpha_text_blocks(raw_item, relevance_query, max_results, _executed_query=search_query))
         for score, block in parsed_blocks:
             key = block.lower()
+            _capture_publication(block=block, decision_stage="dedupe",
+                                 decision_reason="duplicate_of" if key in seen else "accepted",
+                                 decision_query=relevance_query, query_variant=search_query,
+                                 provider="alphaxiv", payload={"scope": "provider", "dedupe_key": key})
             if key in seen:
                 continue
             seen.add(key)
@@ -571,16 +723,25 @@ async def _pubmed_blocks(
             key = (
                 f"doi:{doi.lower()}" if doi else (f"pmid:{pmid}" if pmid else f"title:{title.lower()}")
             )
+            _capture_publication(block=f"{title} {abstract}", title=title,
+                                 url=f"https://doi.org/{doi}" if doi else f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else "",
+                                 decision_stage="dedupe", decision_reason="duplicate_of" if key in seen else "accepted",
+                                 provider="pubmed", query_variant=search_query, decision_query=relevance_query,
+                                 payload={"scope": "provider", "dedupe_key": key})
             if key in seen:
                 continue
             seen.add(key)
             score = evidence_score(relevance_query, f"{title} {abstract}", "PUBLICATION")
-            if not is_relevant(
+            keep = is_relevant(
                 relevance_query,
                 f"{title} {abstract}",
                 "PUBLICATION",
                 threshold=MIN_PUBLICATION_RELEVANCE_SCORE,
-            ):
+            )
+            _record_provider_gate(None, block=f"{title} {abstract}", query=relevance_query,
+                                  executed_query=search_query, provider="pubmed", score=score, keep=keep,
+                                  title=title, url=f"https://doi.org/{doi}" if doi else f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else "")
+            if not keep:
                 continue
             blocks.append(
                 (
@@ -596,6 +757,8 @@ async def _pubmed_blocks(
                     ),
                 )
             )
+            _remember_publication(blocks[-1][1], "pubmed", search_query,
+                                  identity_title=title, identity_score_text=f"{title} {abstract}")
         if len(blocks) >= max_results:
             break
     return blocks
@@ -718,20 +881,31 @@ async def _openalex_blocks(
             continue
         for title, authors, year, abstract, doi_url, work_url in results:
             key = doi_url.lower() if doi_url != "Not available" else title.lower()
+            _capture_publication(block=f"{title} {abstract}", title=title,
+                                 url=doi_url if doi_url != "Not available" else work_url,
+                                 decision_stage="dedupe", decision_reason="duplicate_of" if key and key in seen else "accepted",
+                                 provider="openalex", query_variant=search_query, decision_query=relevance_query,
+                                 payload={"scope": "provider", "dedupe_key": key})
             if key and key in seen:
                 continue
             if key:
                 seen.add(key)
             score = evidence_score(relevance_query, f"{title} {abstract}", "PUBLICATION")
-            if not is_relevant(
+            keep = is_relevant(
                 relevance_query,
                 f"{title} {abstract}",
                 "PUBLICATION",
                 threshold=MIN_PUBLICATION_RELEVANCE_SCORE,
-            ):
+            )
+            _record_provider_gate(None, block=f"{title} {abstract}", query=relevance_query,
+                                  executed_query=search_query, provider="openalex", score=score, keep=keep,
+                                  title=title, url=doi_url if doi_url != "Not available" else work_url)
+            if not keep:
                 continue
             excerpt = _relevant_abstract_excerpt(abstract, relevance_query)
             blocks.append((score, _openalex_block(title, authors, year, excerpt, doi_url, work_url, score)))
+            _remember_publication(blocks[-1][1], "openalex", search_query,
+                                  identity_title=title, identity_score_text=f"{title} {abstract}")
         if len(blocks) >= max_results:
             break
     return blocks
@@ -758,20 +932,30 @@ async def _crossref_blocks(
     for search_query in search_queries:
         for title, authors, year, abstract, doi_url in await _crossref_search(search_query, max_results):
             key = doi_url.lower() if doi_url != "Not available" else title.lower()
+            _capture_publication(block=f"{title} {abstract}", title=title, url=doi_url,
+                                 decision_stage="dedupe", decision_reason="duplicate_of" if key and key in seen else "accepted",
+                                 provider="crossref", query_variant=search_query, decision_query=relevance_query,
+                                 payload={"scope": "provider", "dedupe_key": key})
             if key and key in seen:
                 continue
             if key:
                 seen.add(key)
             score = evidence_score(relevance_query, f"{title} {abstract}", "PUBLICATION")
-            if not is_relevant(
+            keep = is_relevant(
                 relevance_query,
                 f"{title} {abstract}",
                 "PUBLICATION",
                 threshold=MIN_PUBLICATION_RELEVANCE_SCORE,
-            ):
+            )
+            _record_provider_gate(None, block=f"{title} {abstract}", query=relevance_query,
+                                  executed_query=search_query, provider="crossref", score=score, keep=keep,
+                                  title=title, url=doi_url)
+            if not keep:
                 continue
             excerpt = _relevant_abstract_excerpt(abstract, relevance_query)
             blocks.append((score, _crossref_block(title, authors, year, excerpt, doi_url, score)))
+            _remember_publication(blocks[-1][1], "crossref", search_query,
+                                  identity_title=title, identity_score_text=f"{title} {abstract}")
         if len(blocks) >= max_results:
             break
     return blocks
@@ -821,20 +1005,16 @@ def _rerank_with_corpus_idf(
         keep = is_relevant(
             relevance_query, block, "PUBLICATION", threshold=MIN_PUBLICATION_RELEVANCE_SCORE, idf=idf
         )
-        safe_record(
+        _capture_publication(
             _collector,
             decision_stage="merged_rerank",
             decision_reason="accepted" if keep else "below_threshold",
-            score_text=block,
+            block=block,
             decision_query=relevance_query,
-            # relevance_query is the join of every search variant, not a query any
-            # provider executed. Recording it as query_variant would misreport
-            # provenance, so the executed variant is left empty at this stage.
-            query_variant="",
-            provider=_extract_block_provider(block),
             score_at_decision=new_score,
             threshold_at_decision=MIN_PUBLICATION_RELEVANCE_SCORE,
             retained=keep,
+            _capture_idf=idf,
         )
         if keep:
             rescored.append((new_score, block))
@@ -847,14 +1027,12 @@ def _rerank_with_corpus_idf(
     rejected.sort(key=lambda item: item[0], reverse=True)
     fill = _IDF_RERANK_MIN_KEPT - len(rescored)
     for restored_score, restored_block in rejected[:fill]:
-        safe_record(
+        _capture_publication(
             _collector,
             decision_stage="fill_back",
             decision_reason="restored_to_meet_minimum",
-            score_text=restored_block,
+            block=restored_block,
             decision_query=relevance_query,
-            query_variant="",
-            provider=_extract_block_provider(restored_block),
             score_at_decision=restored_score,
             threshold_at_decision=MIN_PUBLICATION_RELEVANCE_SCORE,
             retained=True,
@@ -924,6 +1102,12 @@ async def _semantic_scholar_blocks(
                 continue
             doi = (item.get("externalIds") or {}).get("DOI")
             key = str(doi or item.get("url") or item.get("title") or "")
+            _capture_publication(block=f"{item.get('title', 'Untitled')} {abstract}",
+                                 title=item.get("title", "Untitled"),
+                                 url=f"https://doi.org/{doi}" if doi else item.get("url") or "",
+                                 decision_stage="dedupe", decision_reason="duplicate_of" if key and key.lower() in seen else "accepted",
+                                 provider="semanticscholar", query_variant=search_query, decision_query=relevance_query,
+                                 payload={"scope": "provider", "dedupe_key": key.lower()})
             if key and key.lower() in seen:
                 continue
             if key:
@@ -942,11 +1126,18 @@ async def _semantic_scholar_blocks(
                 ]
             )
             score = evidence_score(relevance_query, block, "PUBLICATION")
-            if not is_relevant(
+            keep = is_relevant(
                 relevance_query, block, "PUBLICATION", threshold=MIN_PUBLICATION_RELEVANCE_SCORE
-            ):
+            )
+            _record_provider_gate(None, block=block, query=relevance_query,
+                                  executed_query=search_query, provider="semanticscholar", score=score, keep=keep,
+                                  identity_score_text=f"{item.get('title', 'Untitled')} {abstract}")
+            if not keep:
                 continue
             block = f"Local rerank score for this publication: {score}/10.\n{block}"
+            _remember_publication(block, "semanticscholar", search_query,
+                                  identity_title=item.get("title", "Untitled"),
+                                  identity_score_text=f"{item.get('title', 'Untitled')} {abstract}")
             blocks.append((score, block))
     return blocks, errored, rate_limited
 
@@ -987,17 +1178,26 @@ async def _arxiv_blocks_safe(
                 if "Publication title returned by ArXiv" not in block:
                     continue
                 score = evidence_score(relevance_query, block, "PUBLICATION")
-                if not is_relevant(
+                keep = is_relevant(
                     relevance_query, block, "PUBLICATION", threshold=MIN_PUBLICATION_RELEVANCE_SCORE
-                ):
+                )
+                _record_provider_gate(None, block=block, query=relevance_query,
+                                      executed_query=search_query, provider="arxiv", score=score, keep=keep)
+                if not keep:
                     continue
                 key = block.lower()[:200]
+                _capture_publication(block=block, decision_stage="dedupe",
+                                     decision_reason="duplicate_of" if key in seen else "accepted",
+                                     decision_query=relevance_query, query_variant=search_query,
+                                     provider="arxiv", payload={"scope": "provider", "dedupe_key": key})
                 if key in seen:
                     continue
                 seen.add(key)
                 blocks.append(
                     (score, f"{block}\nLocal rerank score for this publication: {score}/10.")
                 )
+                _remember_publication(blocks[-1][1], "arxiv", search_query,
+                                      identity_score_text=block)
             if len(blocks) >= max_results:
                 break
         return blocks
@@ -1006,10 +1206,18 @@ async def _arxiv_blocks_safe(
 
 
 async def publications_search(
-    query: Any, max_results: int = 5, english_query: str = ""
-, *, _collector: Any = None
+    query: Any, max_results: int = 5, english_query: str = "", *, _collector: Any = None
 ) -> str:
     """Search for scholarly publications across the available providers."""
+    state = None if _collector is None else (_collector, {})
+    with capture_scope(_PUBLICATION_CAPTURE, state):
+        return await _publications_search(query, max_results, english_query, _collector=_collector)
+
+
+async def _publications_search(
+    query: Any, max_results: int, english_query: str, *, _collector: Any = None
+) -> str:
+    """Execute the unchanged search pipeline within the optional capture scope."""
     from .query_normalize import coerce_query_input
     if not isinstance(query, str):
         query = coerce_query_input(query)
@@ -1087,6 +1295,12 @@ async def publications_search(
         for block_list in (s2_blocks, cr_blocks, pubmed_blocks, openalex_blocks, arxiv_blocks, ax_blocks):
             for score, block in block_list:
                 doi_key, title_key = _publication_dedupe_keys(block)
+                _capture_publication(
+                    block=block, decision_stage="dedupe",
+                    decision_reason="duplicate_of" if (doi_key and doi_key in seen_dois) or (title_key and title_key in seen_titles) else "accepted",
+                    decision_query=relevance_query,
+                    payload={"scope": "merged", "doi_key": doi_key, "title_key": title_key},
+                )
                 if doi_key and doi_key in seen_dois:
                     continue
                 if title_key and title_key in seen_titles:
@@ -1107,6 +1321,7 @@ async def publications_search(
             return float(score) * multiplier
         merged.sort(key=_sort_score, reverse=True)
         selected_blocks = merged[: max(1, min(max_results, 20))]
+        _capture_selection(merged, max(1, min(max_results, 20)), relevance_query)
         text = "\n\n".join(block for _score, block in selected_blocks)
         provider_counts: dict[str, int] = {}
         for _score, block in selected_blocks:
@@ -1217,6 +1432,7 @@ async def publications_search(
             if crossref_blocks:
                 crossref_blocks.sort(key=lambda item: item[0], reverse=True)
                 selected_blocks = crossref_blocks[:max(1, min(max_results, 20))]
+                _capture_selection(crossref_blocks, max(1, min(max_results, 20)), relevance_query)
                 return _publication_partial(
                     f"Semantic Scholar failed ({exc}); Crossref supplied partial relevant records.",
                     clean_output("\n\n".join(block for _score, block in selected_blocks)),
@@ -1228,6 +1444,7 @@ async def publications_search(
             if alpha_blocks:
                 alpha_blocks.sort(key=lambda item: item[0], reverse=True)
                 selected_blocks = alpha_blocks[:max(1, min(max_results, 20))]
+                _capture_selection(alpha_blocks, max(1, min(max_results, 20)), relevance_query)
                 return _publication_partial(
                     f"Semantic Scholar failed ({exc}); AlphaXiv supplied partial relevant records.",
                     clean_output("\n\n".join(block for _score, block in selected_blocks)),

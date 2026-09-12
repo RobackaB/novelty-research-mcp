@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from typing import Any
 from urllib.parse import urljoin
@@ -18,11 +19,14 @@ from bs4 import BeautifulSoup
 from ._ttl_cache import TTLCache
 from .output_cleaner import USER_AGENT, trim_words
 from .patent_filters import extract_patent_number
-from .decision_capture import safe_record
+from .decision_capture import _warn_capture_failure, capture_scope, safe_record
 from .relevance import build_corpus_idf, discriminative_tokens, evidence_score, tokens
 from .result_contract import NormalizedResult
 
 LOGGER = logging.getLogger(__name__)
+_PROVIDER_CAPTURE: ContextVar[tuple[Any, str, str, str] | None] = ContextVar(
+    "patent_provider_capture", default=None
+)
 MAX_RESULTS_CAP = 10
 MIN_RELEVANCE_SCORE = 2.8
 MIN_RELEVANCE_FALLBACK_NEEDED = 3
@@ -134,9 +138,13 @@ def _origin_of(
     missing rather than substituted with the normalised query, which would
     misreport which provider call actually produced the candidate.
     """
-    if not origins:
+    try:
+        if not origins:
+            return ("", "")
+        return origins.get(id(candidate), ("", ""))
+    except Exception as exc:
+        _warn_capture_failure(LOGGER, "patent origin capture failed", exc)
         return ("", "")
-    return origins.get(id(candidate), ("", ""))
 
 
 def _dedupe(
@@ -150,6 +158,10 @@ def _dedupe(
     comparing titles, such an invention reached the report up to four times and
     crowded out other hits.
     """
+    context = _PROVIDER_CAPTURE.get()
+    if _collector is None and context is not None:
+        _collector, _decision_query, provider, variant = context
+        _origins = {id(candidate): (provider, variant) for candidate in candidates}
     seen: set[str] = set()
     seen_titles: set[str] = set()
     out: list[PatentCandidate] = []
@@ -194,6 +206,46 @@ def _dedupe(
             seen_titles.add(title_key)
         out.append(candidate)
     return out
+
+
+def _provider_candidates(candidates: list[PatentCandidate]) -> list[PatentCandidate]:
+    """Preserve provider dedupe/cap while observing structural removals."""
+    deduped = _dedupe(candidates)
+    context = _PROVIDER_CAPTURE.get()
+    if context is not None:
+        collector, query, provider, variant = context
+        for candidate in deduped[PROVIDER_CANDIDATE_CAP:]:
+            safe_record(
+                collector, decision_stage="truncation", decision_reason="beyond_limit",
+                title=candidate.title, canonical_id=candidate.patent_number,
+                url=candidate.url, score_text=f"{candidate.title} {candidate.snippet}",
+                decision_query=query, query_variant=variant, provider=provider,
+                payload={"limit": PROVIDER_CANDIDATE_CAP, "scope": "provider"},
+            )
+    return deduped[:PROVIDER_CANDIDATE_CAP]
+
+
+def _record_threshold(
+    collector: Any, query: str, candidates: list[PatentCandidate], threshold: float,
+    reason: str, origins: dict[int, tuple[str, str]] | None,
+    allow_low_confidence: bool,
+) -> None:
+    """Observe each evaluated threshold tier, never drive production selection."""
+    if collector is None:
+        return
+    for candidate in candidates:
+        keep = candidate.score >= threshold
+        provider, variant = _origin_of(origins, candidate)
+        safe_record(
+            collector, decision_stage="threshold_filter",
+            decision_reason=reason if keep else "below_threshold",
+            title=candidate.title, canonical_id=candidate.patent_number,
+            url=candidate.url, score_text=f"{candidate.title} {candidate.snippet}",
+            decision_query=query, query_variant=variant,
+            provider=provider or candidate.provider, score_at_decision=candidate.score,
+            threshold_at_decision=threshold, retained=keep,
+            payload={"allow_low_confidence": allow_low_confidence},
+        )
 
 
 _PHRASE_SCORE_STOP = {"that", "this", "with", "from", "into", "have", "been", "will", "would", "should", "could", "what", "when", "where", "which", "while", "such"}
@@ -314,7 +366,7 @@ async def _tavily_patent_search(client: httpx.AsyncClient, query: str, limit: in
         item = _candidate(title, url, "", snippet, "tavily")
         if item:
             candidates.append(item)
-    return _dedupe(candidates)[:PROVIDER_CANDIDATE_CAP]
+    return _provider_candidates(candidates)
 
 
 async def _exa_patent_search(client: httpx.AsyncClient, query: str, limit: int) -> list[PatentCandidate]:
@@ -347,7 +399,7 @@ async def _exa_patent_search(client: httpx.AsyncClient, query: str, limit: int) 
         item = _candidate(title, url, "", snippet, "exa")
         if item:
             candidates.append(item)
-    return _dedupe(candidates)[:PROVIDER_CANDIDATE_CAP]
+    return _provider_candidates(candidates)
 
 
 async def _google_patents_xhr_search(client: httpx.AsyncClient, query: str, limit: int) -> list[PatentCandidate]:
@@ -393,7 +445,7 @@ async def _google_patents_xhr_search(client: httpx.AsyncClient, query: str, limi
                     grant_date=_text(patent.get("grant_date") or patent.get("publication_date")),
                 )
             )
-    return _dedupe(candidates)[:PROVIDER_CANDIDATE_CAP]
+    return _provider_candidates(candidates)
 
 
 def _wipo_publication_number(anchor_text: str, row_text: str, url: str) -> str:
@@ -469,7 +521,7 @@ async def _wipo_patentscope_search(client: httpx.AsyncClient, query: str, limit:
         )
         if item:
             candidates.append(item)
-    return _dedupe(candidates)[:PROVIDER_CANDIDATE_CAP]
+    return _provider_candidates(candidates)
 
 
 def _shares_discriminative_term(query: str, candidate: PatentCandidate) -> bool:
@@ -531,6 +583,8 @@ def _rank(
         for candidate in on_topic
         if candidate.score >= MIN_RELEVANCE_SCORE
     ]
+    _record_threshold(_collector, query, on_topic, MIN_RELEVANCE_SCORE,
+                      "accepted", _origins, allow_low_confidence)
     threshold_used = float(MIN_RELEVANCE_SCORE)
     if len(primary) < MIN_RELEVANCE_FALLBACK_NEEDED:
         relaxed = [
@@ -538,6 +592,8 @@ def _rank(
             for candidate in on_topic
             if candidate.score >= MIN_RELEVANCE_SCORE_FALLBACK
         ]
+        _record_threshold(_collector, query, on_topic, MIN_RELEVANCE_SCORE_FALLBACK,
+                          "relaxed_threshold_applied", _origins, allow_low_confidence)
         if len(relaxed) > len(primary):
             primary = relaxed
             threshold_used = float(MIN_RELEVANCE_SCORE_FALLBACK)
@@ -549,30 +605,10 @@ def _rank(
         # second condition, patents reached the report that were linked to the
         # query by generic technical vocabulary alone (method, system, device).
         ranked = [candidate for candidate in on_topic if candidate.score >= MIN_RELEVANCE_FLOOR]
+        _record_threshold(_collector, query, on_topic, MIN_RELEVANCE_FLOOR,
+                          "floor_applied", _origins, allow_low_confidence)
     else:
         ranked = []
-    kept_ids = {id(c) for c in ranked}
-    for candidate in on_topic:
-        if id(candidate) in kept_ids:
-            continue
-        # Passed the domain anchor but not the score gate. threshold_used names
-        # which of the three tiers was in force.
-        safe_record(
-            _collector,
-            decision_stage="threshold_filter",
-            decision_reason="below_threshold",
-            title=candidate.title,
-            canonical_id=candidate.patent_number,
-            url=candidate.url,
-            score_text=f"{candidate.title} {candidate.snippet}",
-            decision_query=query,
-            query_variant=_origin_of(_origins, candidate)[1],
-            provider=_origin_of(_origins, candidate)[0]
-            or (getattr(candidate, "provider", "") or ""),
-            score_at_decision=candidate.score,
-            threshold_at_decision=threshold_used,
-            retained=False,
-        )
     sorted_ranked = sorted(ranked, key=lambda item: (-item.score, item.patent_number))[:limit]
     surviving = {id(c) for c in sorted_ranked}
     for candidate in ranked:
@@ -663,7 +699,8 @@ async def patent_search(query: str, max_results: int = 10, *, _collector: Any = 
     async def _run_provider_variant(provider_name: str, provider, variant: str):
         """Run one provider with one query variant and capture any errors."""
         try:
-            candidates = await provider(client, variant, limit)
+            with capture_scope(_PROVIDER_CAPTURE, (_collector, normalized_query, provider_name, variant)):
+                candidates = await provider(client, variant, limit)
             return ("ok", provider_name, variant, candidates)
         except ProviderUnavailable as exc:
             return ("unavailable", provider_name, variant, exc)
@@ -758,7 +795,10 @@ async def patent_search(query: str, max_results: int = 10, *, _collector: Any = 
         _PATENT_SEARCH_CACHE.set(cache_key, result)
         return result
 
-    low_confidence_ranked, _ = _rank(normalized_query, deduped_candidates, limit, allow_low_confidence=True)
+    low_confidence_ranked, _ = _rank(
+        normalized_query, deduped_candidates, limit, allow_low_confidence=True,
+        _collector=_collector, _origins=candidate_origins,
+    )
     if low_confidence_ranked:
         result = _json_response(
             NormalizedResult(

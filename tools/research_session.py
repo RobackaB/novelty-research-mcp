@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .decision_capture import CollectorContext, DecisionCollector
+from .decision_capture import CollectorContext, DecisionCollector, _warn_capture_failure
 from .evidence_quality import grade_source, hit_quality_score
 from .final_answer_pack import final_answer_pack
 from .merge_evidence_pack import merge_evidence_pack
@@ -227,36 +227,6 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             payload_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL
         );
-
-        CREATE TABLE IF NOT EXISTS evaluation_candidate_decisions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            schema_version TEXT NOT NULL DEFAULT 'candidate_decision.v1',
-            query_fingerprint TEXT NOT NULL DEFAULT '',
-            query_envelope_hash TEXT NOT NULL DEFAULT '',
-            example_id TEXT NOT NULL DEFAULT '',
-            session_id TEXT NOT NULL DEFAULT '',
-            run_id TEXT NOT NULL DEFAULT '',
-            source_type TEXT NOT NULL DEFAULT '',
-            attempt INTEGER NOT NULL DEFAULT 0,
-            decision_stage TEXT NOT NULL DEFAULT '',
-            decision_reason TEXT NOT NULL DEFAULT '',
-            candidate_identity TEXT NOT NULL DEFAULT '',
-            candidate_identity_kind TEXT NOT NULL DEFAULT '',
-            title TEXT NOT NULL DEFAULT '',
-            score_text TEXT NOT NULL DEFAULT '',
-            decision_query TEXT NOT NULL DEFAULT '',
-            query_variant TEXT NOT NULL DEFAULT '',
-            provider TEXT NOT NULL DEFAULT '',
-            score_at_decision REAL,
-            threshold_at_decision REAL,
-            retained INTEGER,
-            dataset_eligible INTEGER NOT NULL DEFAULT 1,
-            payload_json TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL DEFAULT ''
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_eval_decisions_fingerprint
-        ON evaluation_candidate_decisions(query_fingerprint, source_type, decision_stage);
 
         CREATE TABLE IF NOT EXISTS schema_migrations (
             name TEXT PRIMARY KEY,
@@ -799,6 +769,44 @@ def _row_has_focused_hit(row: sqlite3.Row | None) -> bool:
     return False
 
 
+def _ensure_decision_schema(conn: sqlite3.Connection) -> None:
+    """Create evaluation storage only inside the fail-open capture transaction."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS evaluation_candidate_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            schema_version TEXT NOT NULL DEFAULT 'candidate_decision.v1',
+            query_fingerprint TEXT NOT NULL DEFAULT '',
+            query_envelope_hash TEXT NOT NULL DEFAULT '',
+            example_id TEXT NOT NULL DEFAULT '',
+            session_id TEXT NOT NULL DEFAULT '',
+            run_id TEXT NOT NULL DEFAULT '',
+            source_type TEXT NOT NULL DEFAULT '',
+            attempt INTEGER NOT NULL DEFAULT 0,
+            decision_stage TEXT NOT NULL DEFAULT '',
+            decision_reason TEXT NOT NULL DEFAULT '',
+            candidate_identity TEXT NOT NULL DEFAULT '',
+            candidate_identity_kind TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            score_text TEXT NOT NULL DEFAULT '',
+            decision_query TEXT NOT NULL DEFAULT '',
+            query_variant TEXT NOT NULL DEFAULT '',
+            provider TEXT NOT NULL DEFAULT '',
+            score_at_decision REAL,
+            threshold_at_decision REAL,
+            retained INTEGER,
+            dataset_eligible INTEGER NOT NULL DEFAULT 1,
+            payload_json TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_eval_decisions_fingerprint "
+        "ON evaluation_candidate_decisions(query_fingerprint, source_type, decision_stage)"
+    )
+
+
 def _persist_decision_events(collector: Any) -> None:
     """Write collected decision events to their own table. Fail-open by design.
 
@@ -835,6 +843,10 @@ def _persist_decision_events(collector: Any) -> None:
             for e in events
         ]
         with _connect() as conn:
+            # Explicit BEGIN includes DDL in the same rollback boundary as the
+            # batch insert. Evaluation failures never poison production opens.
+            conn.execute("BEGIN")
+            _ensure_decision_schema(conn)
             conn.executemany(
                 """
                 INSERT INTO evaluation_candidate_decisions(
@@ -847,8 +859,8 @@ def _persist_decision_events(collector: Any) -> None:
                 """,
                 rows,
             )
-    except Exception:  # noqa: BLE001 - capture must never affect retrieval
-        LOGGER.warning("decision persistence failed; evidence is unaffected", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 - capture must never affect retrieval
+        _warn_capture_failure(LOGGER, "decision persistence failed; evidence is unaffected", exc)
 
 
 def _new_decision_collector(
@@ -863,10 +875,8 @@ def _new_decision_collector(
     """
     try:
         return _build_decision_collector(session_id, run_id, source_type, attempt, original_query)
-    except Exception:  # noqa: BLE001 - capture setup must never break retrieval
-        LOGGER.warning(
-            "decision capture setup failed; continuing without capture", exc_info=True
-        )
+    except Exception as exc:  # noqa: BLE001 - capture setup must never break retrieval
+        _warn_capture_failure(LOGGER, "decision capture setup failed; continuing without capture", exc)
         return None
 
 
@@ -882,8 +892,9 @@ def _build_decision_collector(
     # condition (the session may not exist yet), not an error to hide.
     envelope_hash = ""
     session_query = str(original_query or "")
+    clean_id = _clean_session_id(session_id)
     with _connect() as conn:
-        row = _session_row(conn, _clean_session_id(session_id))
+        row = _session_row(conn, clean_id)
     if row is not None:
         stored_query = str(row["original_query"] or "")
         if stored_query:
@@ -893,7 +904,7 @@ def _build_decision_collector(
         envelope_hash = query_envelope_hash(atoms or [])
     return DecisionCollector(
         context=CollectorContext(
-            session_id=str(session_id or ""),
+            session_id=clean_id,
             run_id=str(run_id or ""),
             source_type=str(source_type or ""),
             attempt=int(attempt or 0),
@@ -3292,7 +3303,7 @@ async def patent_evidence_to_session(
     atomic_requirements = _load_atomic_requirements(session_id)
     try:
         _collector = _new_decision_collector(
-            session_id, run_id, "patent", int(begin["attempt"]), clean_query
+            begin["session_id"], run_id, "patent", int(begin["attempt"]), clean_query
         )
         try:
             evidence = await patent_evidence_pack(
@@ -3366,7 +3377,7 @@ async def publication_evidence_to_session(
     atomic_requirements = _load_atomic_requirements(session_id)
     try:
         _collector = _new_decision_collector(
-            session_id, run_id, "publication", int(begin["attempt"]), clean_query
+            begin["session_id"], run_id, "publication", int(begin["attempt"]), clean_query
         )
         try:
             evidence = await publication_evidence_pack(
@@ -3440,7 +3451,7 @@ async def web_evidence_to_session(
     atomic_requirements = _load_atomic_requirements(session_id)
     try:
         _collector = _new_decision_collector(
-            session_id, run_id, "web", int(begin["attempt"]), clean_query
+            begin["session_id"], run_id, "web", int(begin["attempt"]), clean_query
         )
         try:
             evidence = await web_evidence_pack(
