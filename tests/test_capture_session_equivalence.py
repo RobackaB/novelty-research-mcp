@@ -51,6 +51,22 @@ def _run_session(monkeypatch, db_path, mode: str, caplog) -> dict:
             raise RuntimeError("injected collector setup failure")
         if mode == "disabled":
             return None
+        if mode in {"missing_session_row", "missing_original_query"}:
+            real_row = rs._session_row
+
+            def missing_provenance(*row_args):
+                faults.append(mode)
+                row = real_row(*row_args)
+                assert row is not None
+                return None if mode == "missing_session_row" else dict(row, original_query="")
+
+            # Simulate a failed provenance read only inside capture setup.
+            # Production session reads and provider I/O remain real.
+            with monkeypatch.context() as capture_patch:
+                capture_patch.setattr(rs, "_session_row", missing_provenance)
+                collector = real_builder(*args, **kwargs)
+            collectors.append(collector)
+            return collector
         collector = (
             CountingRaisingCollector() if mode == "record_failure"
             else real_builder(*args, **kwargs)
@@ -155,6 +171,7 @@ def _assert_full_capture(result: dict) -> None:
 
 @pytest.mark.parametrize("mode", [
     "enabled", "record_failure", "setup_failure", "insert_failure", "ddl_failure",
+    "missing_session_row", "missing_original_query",
 ])
 def test_real_session_outputs_and_retries_are_capture_independent(
     monkeypatch, temp_db, caplog, mode,
@@ -180,6 +197,12 @@ def test_real_session_outputs_and_retries_are_capture_independent(
         assert any("capture setup failed" in record.message
                    and record.levelno >= logging.WARNING for record in result["logs"])
         assert result["persisted"] == []
+    elif mode in {"missing_session_row", "missing_original_query"}:
+        assert result["faults"] == [mode] * 6
+        assert result["collectors"] == [None] * 6
+        assert result["persisted"] == []
+        assert any("stored original query unavailable" in record.message
+                   and record.levelno >= logging.WARNING for record in result["logs"])
     else:
         assert result["faults"] == ["insert" if mode == "insert_failure" else "ddl"] * 6
         assert len(result["collectors"]) == 6

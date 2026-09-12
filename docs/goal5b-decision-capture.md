@@ -37,6 +37,20 @@ reach provider helpers without changing their call signatures; they are reset
 after each invocation. Provenance sidecars are read only by capture code, never
 by production selection.
 
+- Query fingerprints use exactly the session identity normalization: NFKC,
+  collapsed whitespace, then `lower()` (not `casefold()`). Fingerprints retain
+  32 hex characters; the existing production query hash retains 24. Missing
+  session rows or blank stored original queries disable capture with a sanitized
+  warning. Collector setup accepts no attempt-query fallback.
+- The envelope hash separately detects structural atomic-requirement drift. It
+  hashes version-tagged canonical JSON containing the actual stored `category`,
+  `label`, `terms` and `too_broad_for_element_retry` fields. Dictionary key order
+  and extra metadata are ignored; field values and list order are preserved.
+  Atom order influences variant construction and truncation; term prefixes are
+  used in web query variants, so sorting these lists would hide meaningful drift.
+  An unavailable envelope/atomic list has hash `""`; an explicit empty list has a
+  non-empty structural hash. Malformed atoms fail capture setup with a warning.
+  These hashes describe the atomic decomposition, not every envelope field.
 - `decision_query` is the scorer/gate input; `query_variant` is the argument of
   the provider function that produced the occurrence. It is not necessarily the
   literal HTTP wire query: patent providers can add site restrictions/wrappers.
@@ -114,7 +128,7 @@ or evidence of improved retrieval quality.
 Local verification does not replace GitHub CI on Python 3.11–3.13 or final PR
 review. Push, PR creation and merge remain separate approval steps.
 
-### Local completion verification
+### Initial local completion verification (before PR #25)
 
 On Python 3.14.6, the final code passes **455 tests** with `PYTHONHASHSEED=1`
 (57.99 s) and `PYTHONHASHSEED=97` (58.77 s). The suite includes 16 new explicit
@@ -123,12 +137,39 @@ with the unchanged baseline metrics above; `git diff --check origin/main` is
 clean. `server.py`, `tools/relevance.py` and `eval/dataset.json` are unchanged.
 Python 3.11–3.13 GitHub CI remains pending; no remote work was performed.
 
+### PR provenance review follow-up
+
+PR #25 review identified label-only decomposition hashing, an unsafe original
+query fallback to retry text, and divergent Unicode case normalization. All three
+are corrected by the contracts above. Existing local capture rows are not
+rewritten: earlier label-only hashes and casefold-based query/text identities
+must not be mixed with fresh capture for Goal 5C; recapture those observations.
+The `atomic_requirements.v1` hash-input tag separates the structural algorithm
+from the earlier label-only input without changing the SQLite or MCP schema.
+
+`test_capture_query_identity.py` covers all four structural fields, meaningful
+list ordering, irrelevant mapping ordering, unavailable versus empty envelopes
+through SQLite persistence, missing original queries and Unicode parity. Five
+additional defect-restoration controls exercise label-only hashing, conflated
+unavailable/empty envelopes, casefold normalization, and original-query fallback
+with both a missing row and a blank stored query. Integrated session tests also
+verify unchanged ACKs, production rows, retries and reports when either missing
+provenance condition disables capture across all sources and two attempts.
+
+Follow-up local verification on Python 3.14.6: **491 tests passed** with
+`PYTHONHASHSEED=1` (62.95 s) and `PYTHONHASHSEED=97` (66.40 s), including all five
+new negative controls and the earlier controls. Full relevance evaluation remains
+precision 0.611, recall 0.833, F1 0.683, P@k 0.667, MAP 0.759, MRR 0.778.
+`git diff --check` is clean. Fresh Python 3.11–3.13 GitHub CI and final review are
+required before merge.
+
 ### Files changed after v5
 
 ```text
 docs/goal5b-decision-capture.md
 tests/test_capture_coverage.py
 tests/test_capture_publication_lifecycle.py
+tests/test_capture_query_identity.py
 tests/test_capture_search_lifecycle.py
 tests/test_capture_session_equivalence.py
 tests/test_capture_storage_guards.py

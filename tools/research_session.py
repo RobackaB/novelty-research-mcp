@@ -864,7 +864,7 @@ def _persist_decision_events(collector: Any) -> None:
 
 
 def _new_decision_collector(
-    session_id: str, run_id: str, source_type: str, attempt: int, original_query: str
+    session_id: str, run_id: str, source_type: str, attempt: int
 ) -> DecisionCollector | None:
     """Build a collector carrying the provenance only this layer owns.
 
@@ -874,15 +874,15 @@ def _new_decision_collector(
     diagnostic: losing it must cost nothing but the diagnostics.
     """
     try:
-        return _build_decision_collector(session_id, run_id, source_type, attempt, original_query)
+        return _build_decision_collector(session_id, run_id, source_type, attempt)
     except Exception as exc:  # noqa: BLE001 - capture setup must never break retrieval
         _warn_capture_failure(LOGGER, "decision capture setup failed; continuing without capture", exc)
         return None
 
 
 def _build_decision_collector(
-    session_id: str, run_id: str, source_type: str, attempt: int, original_query: str
-) -> DecisionCollector:
+    session_id: str, run_id: str, source_type: str, attempt: int
+) -> DecisionCollector | None:
     """Read session provenance and construct the collector."""
     from .decision_capture import query_envelope_hash, query_fingerprint
 
@@ -890,18 +890,18 @@ def _build_decision_collector(
     # must identify the user's query, not the cleaned or per-attempt search text,
     # so retries and variants stay one evaluation sample. Missing rows are a real
     # condition (the session may not exist yet), not an error to hide.
-    envelope_hash = ""
-    session_query = str(original_query or "")
     clean_id = _clean_session_id(session_id)
     with _connect() as conn:
         row = _session_row(conn, clean_id)
-    if row is not None:
-        stored_query = str(row["original_query"] or "")
-        if stored_query:
-            session_query = stored_query
-        envelope = _safe_json_loads(row["query_envelope_json"], {})
-        atoms = envelope.get("critical_requirements_atomic") if isinstance(envelope, dict) else None
-        envelope_hash = query_envelope_hash(atoms or [])
+    if row is None or not normalize_query_for_hash(row["original_query"]):
+        _warn_capture_failure(
+            LOGGER, "decision capture skipped: stored original query unavailable", ValueError(),
+        )
+        return None
+    session_query = str(row["original_query"])
+    envelope = _safe_json_loads(row["query_envelope_json"], {})
+    atoms = envelope.get("critical_requirements_atomic") if isinstance(envelope, dict) else None
+    envelope_hash = query_envelope_hash(atoms)
     return DecisionCollector(
         context=CollectorContext(
             session_id=clean_id,
@@ -3303,7 +3303,7 @@ async def patent_evidence_to_session(
     atomic_requirements = _load_atomic_requirements(session_id)
     try:
         _collector = _new_decision_collector(
-            begin["session_id"], run_id, "patent", int(begin["attempt"]), clean_query
+            begin["session_id"], run_id, "patent", int(begin["attempt"])
         )
         try:
             evidence = await patent_evidence_pack(
@@ -3377,7 +3377,7 @@ async def publication_evidence_to_session(
     atomic_requirements = _load_atomic_requirements(session_id)
     try:
         _collector = _new_decision_collector(
-            begin["session_id"], run_id, "publication", int(begin["attempt"]), clean_query
+            begin["session_id"], run_id, "publication", int(begin["attempt"])
         )
         try:
             evidence = await publication_evidence_pack(
@@ -3451,7 +3451,7 @@ async def web_evidence_to_session(
     atomic_requirements = _load_atomic_requirements(session_id)
     try:
         _collector = _new_decision_collector(
-            begin["session_id"], run_id, "web", int(begin["attempt"]), clean_query
+            begin["session_id"], run_id, "web", int(begin["attempt"])
         )
         try:
             evidence = await web_evidence_pack(

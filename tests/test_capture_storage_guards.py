@@ -105,7 +105,7 @@ def test_evaluation_insert_failure_rolls_back_entire_batch(temp_db, caplog):
 def test_collector_uses_the_canonical_stored_session_id(temp_db):
     supplied_id = "  session / with spaces  "
     started = json.loads(rs.research_session_start("smart door lock", session_id=supplied_id))
-    collector = rs._new_decision_collector(supplied_id, "run", "web", 2, "retry query")
+    collector = rs._new_decision_collector(supplied_id, "run", "web", 2)
     assert collector is not None
     assert collector.context.session_id == started["session_id"] == "session_with_spaces"
     collector.record(decision_stage="provider_filter", decision_reason="accepted")

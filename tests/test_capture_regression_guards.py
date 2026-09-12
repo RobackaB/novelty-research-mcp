@@ -50,7 +50,7 @@ def test_collector_setup_failure_returns_none_instead_of_raising(monkeypatch, te
         raise RuntimeError("fingerprint exploded")
 
     monkeypatch.setattr("tools.decision_capture.query_fingerprint", boom)
-    result = rs._new_decision_collector(session_id, "run1", "web", 1, QUERY)
+    result = rs._new_decision_collector(session_id, "run1", "web", 1)
     assert result is None, "capture setup must be fail-open, not raise"
 
 
@@ -62,7 +62,7 @@ def test_collector_setup_failure_logs_at_warning(monkeypatch, temp_db, caplog):
 
     monkeypatch.setattr("tools.decision_capture.query_fingerprint", boom)
     with caplog.at_level(logging.WARNING, logger="tools.research_session"):
-        rs._new_decision_collector(session_id, "run1", "web", 1, QUERY)
+        rs._new_decision_collector(session_id, "run1", "web", 1)
     assert any("capture setup failed" in r.message for r in caplog.records)
     assert any(r.levelno >= logging.WARNING for r in caplog.records)
 

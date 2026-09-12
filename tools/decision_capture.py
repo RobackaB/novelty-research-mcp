@@ -92,9 +92,10 @@ _RECORD_SEP: Final = "\x1e"
 
 
 def normalize_query_for_hash(query: str) -> str:
-    """Normalise a query into the stable form used for its fingerprint."""
-    folded = unicodedata.normalize("NFKC", str(query or "")).casefold()
-    return _WHITESPACE_RE.sub(" ", folded).strip()
+    """Match research_session normalization without importing the writer layer."""
+    normalized = unicodedata.normalize("NFKC", str(query or ""))
+    normalized = _WHITESPACE_RE.sub(" ", normalized.strip())
+    return normalized.lower()
 
 
 def query_fingerprint(original_query: str) -> str:
@@ -110,28 +111,36 @@ def query_fingerprint(original_query: str) -> str:
 
 
 def query_envelope_hash(atomic_requirements: Any) -> str:
-    """Hash the atomic requirement LABELS so decomposition drift is detectable.
+    """Hash the stored atomic schema, independently of primary query identity.
 
-    Kept separate from the fingerprint on purpose: it records that the
-    decomposition changed without changing the query's identity.
-
-    Scope: only the normalised labels are hashed. Envelope changes that leave
-    every label identical -- a category change, a reordering of an atom's
-    internal fields -- do NOT alter this hash. It is a drift signal, not a
-    complete envelope checksum.
+    None means unavailable; [] is an explicitly empty decomposition. Preserve
+    list order: query variants use atom order and term prefixes. Dictionary key
+    order and non-schema metadata are irrelevant. Reject malformed atoms rather
+    than silently presenting partial provenance as a valid decomposition.
     """
-    labels: list[str] = []
-    if isinstance(atomic_requirements, list):
-        for atom in atomic_requirements:
-            if isinstance(atom, dict):
-                label = atom.get("label") or atom.get("text") or ""
-            else:
-                label = atom
-            normalized = normalize_query_for_hash(str(label))
-            if normalized:
-                labels.append(normalized)
-    joined = _UNIT_SEP.join(sorted(labels))
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:32]
+    if atomic_requirements is None:
+        return ""
+    if not isinstance(atomic_requirements, list):
+        raise ValueError("invalid atomic requirement list")
+    atoms: list[dict[str, Any]] = []
+    for atom in atomic_requirements:
+        if (
+            not isinstance(atom, dict)
+            or not isinstance(atom.get("category"), str)
+            or not isinstance(atom.get("label"), str)
+            or not isinstance(atom.get("terms"), list)
+            or not all(isinstance(term, str) for term in atom["terms"])
+            or not isinstance(atom.get("too_broad_for_element_retry"), bool)
+        ):
+            raise ValueError("invalid atomic requirement schema")
+        atoms.append({key: atom[key] for key in (
+            "category", "label", "terms", "too_broad_for_element_retry",
+        )})
+    canonical = json.dumps(
+        {"schema": "atomic_requirements.v1", "atoms": atoms},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
 
 
 def candidate_identity(

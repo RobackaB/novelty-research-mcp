@@ -54,7 +54,7 @@ def test_distinct_original_queries_are_not_conflated():
 def test_session_collector_uses_the_stored_original_query(temp_db):
     """Built through the real session path, not from the per-attempt query."""
     session_id = json.loads(rs.research_session_start(ORIGINAL_QUERY))["session_id"]
-    collector = rs._new_decision_collector(session_id, "run1", "web", 3, "some other text")
+    collector = rs._new_decision_collector(session_id, "run1", "web", 3)
     assert collector.context.query_fingerprint == query_fingerprint(ORIGINAL_QUERY)
 
 
@@ -64,7 +64,7 @@ def test_envelope_hash_is_computed_from_a_real_envelope(temp_db):
     """A silently-empty hash must not count as success."""
     session_id = json.loads(rs.research_session_start(ORIGINAL_QUERY))["session_id"]
     rs.research_session_understand_query(session_id, english_query=ORIGINAL_QUERY)
-    collector = rs._new_decision_collector(session_id, "run1", "web", 1, ORIGINAL_QUERY)
+    collector = rs._new_decision_collector(session_id, "run1", "web", 1)
     assert collector.context.query_envelope_hash, "envelope hash silently empty"
 
     with rs._connect() as conn:
@@ -79,7 +79,7 @@ def test_envelope_hash_is_computed_from_a_real_envelope(temp_db):
 def test_envelope_hash_persists_through_the_session_path(temp_db):
     session_id = json.loads(rs.research_session_start(ORIGINAL_QUERY))["session_id"]
     rs.research_session_understand_query(session_id, english_query=ORIGINAL_QUERY)
-    collector = rs._new_decision_collector(session_id, "run1", "publication", 1, ORIGINAL_QUERY)
+    collector = rs._new_decision_collector(session_id, "run1", "publication", 1)
     collector.record(decision_stage="provider_filter", decision_reason="accepted", retained=True)
     rs._persist_decision_events(collector)
     with sqlite3.connect(rs._db_path()) as conn:
