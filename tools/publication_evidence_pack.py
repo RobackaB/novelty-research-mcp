@@ -242,8 +242,13 @@ async def publication_evidence_pack(
     fetch_timeout_s: float = 12.0,
     english_query: str = "",
     atomic_requirements: list[dict[str, Any]] | None = None,
+    *,
+    _collector: Any = None,
 ) -> str:
     """Search for and process publication evidence for the given query."""
+    # Passed only when capture is active, so with capture off the call is
+    # byte-identical to before and existing stubs keep working unchanged.
+    _capture_kwargs = {"_collector": _collector} if _collector is not None else {}
     warnings: list[str] = []
     verification_failed = False
     query = clean_tool_query(query)
@@ -252,7 +257,7 @@ async def publication_evidence_pack(
     try:
         search_output = await publications_search(
             query=query, max_results=max_results, english_query=relevance_query if english_query else ""
-        )
+        , **_capture_kwargs)
     except Exception as exc:
         return json.dumps(
             {

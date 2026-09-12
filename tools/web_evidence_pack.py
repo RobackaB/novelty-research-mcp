@@ -332,8 +332,13 @@ async def web_evidence_pack(
     timeout_ms: int = 14000,
     english_query: str = "",
     atomic_requirements: list[dict[str, Any]] | None = None,
+    *,
+    _collector: Any = None,
 ) -> str:
     """Search for and process web evidence for the given query."""
+    # Passed only when capture is active, so with capture off the call is
+    # byte-identical to before and existing stubs keep working unchanged.
+    _capture_kwargs = {"_collector": _collector} if _collector is not None else {}
     warnings: list[str] = []
     errors: list[str] = []
     hits: list[dict] = []
@@ -341,7 +346,7 @@ async def web_evidence_pack(
         query = clean_tool_query(query)
         relevance_query = (english_query or "").strip() or query
         search_query = relevance_query
-        search_output = await web_search(query=search_query, max_results=max_results)
+        search_output = await web_search(query=search_query, max_results=max_results, **_capture_kwargs)
         if parse_status_marker(search_output) == "failed":
             return json.dumps(
                 {

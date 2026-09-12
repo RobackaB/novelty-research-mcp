@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -15,7 +17,8 @@ from bs4 import BeautifulSoup
 from .chromium_scraper import fetch_page_html
 from .jina_reader import fetch_via_jina
 from .output_cleaner import BLOCKED_WEB_DOMAINS, USER_AGENT, clean_output, format_error, trim_words
-from .relevance import build_corpus_idf, evidence_score, is_relevant, tokens
+from .decision_capture import capture_scope, safe_record, _warn_capture_failure
+from .relevance import build_corpus_idf, evidence_score, is_relevant, salient_query_tokens, tokens
 from .requirement_match import unique_coverage_tokens
 from .result_contract import NormalizedResult, prepend_markers
 from .search_bounds import section_query_variants
@@ -36,6 +39,91 @@ PATENT_EVIDENCE_DOMAINS = {
     "worldwide.espacenet.com",
     "patentscope.wipo.int",
 }
+
+LOGGER = logging.getLogger(__name__)
+_PROVIDER_CAPTURE: ContextVar[tuple[Any, str] | None] = ContextVar(
+    "web_provider_capture", default=None
+)
+
+
+def _record_url_gate(item: dict, url: str, query: str, keep: bool) -> None:
+    """Observe URL policy after it runs, including discarded provider documents."""
+    try:
+        context = _PROVIDER_CAPTURE.get()
+        if context is None or context[0] is None:
+            return
+        collector, provider = context
+        title = str(item.get("title") or "Untitled result").strip()
+        snippet = _extract_snippet(
+            (item.get("text") or item.get("summary") or item.get("snippet"))
+            if provider == "exa" else
+            (item.get("content") or item.get("snippet"))
+            if provider == "tavily" else item.get("snippet")
+        )
+        safe_record(
+            collector, decision_stage="url_gate",
+            decision_reason="accepted" if keep else "url_policy_rejected",
+            title=title, url=url, score_text=f"{title}\n{snippet}",
+            decision_query=query, query_variant=query, provider=provider,
+            dataset_eligible=bool(url),
+        )
+    except Exception as exc:
+        _warn_capture_failure(LOGGER, "web URL capture failed", exc)
+
+
+def _record_merged_web(
+    collector: Any, row: tuple[str, str, str, float], query: str,
+    origins: dict[str, tuple[str, str]], stage: str, reason: str,
+    retained: bool | None = None, idf: dict[str, float] | None = None,
+    payload: dict | None = None,
+) -> None:
+    """Observe merged decisions; capture-only score reconstruction is fail-open."""
+    if collector is None:
+        return
+    try:
+        url, title, snippet, score = row
+        provider, variant = origins.get(url, ("", ""))
+        block = f"{title}\n{snippet}"
+        threshold = None
+        if stage == "merged_rerank":
+            salient = salient_query_tokens(query, idf) if idf else set()
+            if not retained and salient and not (salient & tokens(block)):
+                reason, score = "no_discriminative_term", None
+            else:
+                threshold = MIN_WEB_RERANK_SCORE
+                if not retained:
+                    score = evidence_score(query, block, "WEB", idf=idf)
+        safe_record(
+            collector, decision_stage=stage, decision_reason=reason,
+            title=title, url=url, score_text=block, decision_query=query,
+            query_variant=variant, provider=provider, score_at_decision=score,
+            threshold_at_decision=threshold, retained=retained, payload=payload,
+        )
+    except Exception as exc:
+        _warn_capture_failure(LOGGER, "web merged capture failed", exc)
+
+
+def _record_provider_rejection(
+    collector: Any, query: str, variant: str, provider: str,
+    url: str, title: str, snippet: str, score: float,
+) -> None:
+    """Classify the failed combined gate only inside a diagnostic boundary."""
+    if collector is None:
+        return
+    try:
+        overlap_ok = _query_overlap_match(query, f"{title}\n{snippet}")
+        safe_record(
+            collector,
+            decision_stage="provider_filter" if overlap_ok else "content_gate",
+            decision_reason="below_threshold" if overlap_ok else "below_overlap_gate",
+            title=title, url=url, score_text=f"{title}\n{snippet}",
+            decision_query=query, query_variant=variant, provider=provider,
+            score_at_decision=score,
+            threshold_at_decision=MIN_WEB_RERANK_SCORE if overlap_ok else None,
+            retained=False if overlap_ok else None,
+        )
+    except Exception as exc:
+        _warn_capture_failure(LOGGER, "web provider capture failed", exc)
 TEXT_CONTENT_TYPES = ("text/html", "text/plain", "application/xhtml+xml", "application/xml", "text/xml")
 FETCH_TOTAL_TIMEOUT_MS = 14000
 MIN_EXTRACTED_WORDS = 12
@@ -514,7 +602,9 @@ async def _google_cse_query(client: httpx.AsyncClient, query: str, limit: int) -
         if not isinstance(item, dict):
             continue
         url = _canonical_source_url(str(item.get("link") or ""))
-        if not url or not _keep_web_result(url, query):
+        keep_url = bool(url) and _keep_web_result(url, query)
+        _record_url_gate(item, url, query, keep_url)
+        if not keep_url:
             continue
         results.append((
             url,
@@ -546,7 +636,9 @@ async def _tavily_web_query(client: httpx.AsyncClient, query: str, limit: int) -
         if not isinstance(item, dict):
             continue
         url = _canonical_source_url(str(item.get("url") or ""))
-        if not url or not _keep_web_result(url, query):
+        keep_url = bool(url) and _keep_web_result(url, query)
+        _record_url_gate(item, url, query, keep_url)
+        if not keep_url:
             continue
         results.append((
             url,
@@ -577,7 +669,9 @@ async def _exa_web_query(client: httpx.AsyncClient, query: str, limit: int) -> l
         if not isinstance(item, dict):
             continue
         url = _canonical_source_url(str(item.get("url") or ""))
-        if not url or not _keep_web_result(url, query):
+        keep_url = bool(url) and _keep_web_result(url, query)
+        _record_url_gate(item, url, query, keep_url)
+        if not keep_url:
             continue
         title = str(item.get("title") or "Untitled result").strip()
         snippet = item.get("text") or item.get("summary") or item.get("snippet")
@@ -639,7 +733,7 @@ def _ordered_results(
     )[: max(1, min(max_results, 10))]
 
 
-async def web_search(query: Any, max_results: int = 5) -> str:
+async def web_search(query: Any, max_results: int = 5, *, _collector: Any = None) -> str:
     """Search for web results and return cleaned records."""
     try:
         from .query_normalize import coerce_query_input
@@ -664,6 +758,7 @@ async def web_search(query: Any, max_results: int = 5) -> str:
         provider_completed_without_hits: list[str] = []
 
         merged_results: dict[str, tuple[str, str, str, float]] = {}
+        candidate_origins: dict[str, tuple[str, str]] = {}
         merged_failures: list[Exception] = []
         completed_provider_names: list[str] = []
 
@@ -672,7 +767,8 @@ async def web_search(query: Any, max_results: int = 5) -> str:
         ) -> tuple[str, str, str, object]:
             """Run one web provider for one query variant."""
             try:
-                results = await provider(client, variant, max_provider_results)
+                with capture_scope(_PROVIDER_CAPTURE, (_collector, provider_name)):
+                    results = await provider(client, variant, max_provider_results)
                 return ("ok", provider_name, variant, results)
             except WebSearchProviderUnavailable as exc:
                 return ("unavailable", provider_name, variant, exc)
@@ -699,13 +795,48 @@ async def web_search(query: Any, max_results: int = 5) -> str:
                     slot["ok"] += 1
                     for url, title, snippet in payload:
                         if url in merged_results:
+                            # Production keeps the FIRST result for a URL and
+                            # discards this later one. The reason names that
+                            # outcome; the stored winner is not touched.
+                            safe_record(
+                                _collector,
+                                decision_stage="merge_collision",
+                                decision_reason="discarded_duplicate_url",
+                                title=title,
+                                url=url,
+                                score_text=f"{title}\n{snippet}",
+                                decision_query=relevance_query,
+                                query_variant=variant,
+                                provider=provider_name,
+                                payload={"kept_title": merged_results[url][1]},
+                            )
                             continue
                         score = _web_rerank_score(relevance_query, title, snippet)
                         if not _passes_web_rerank(relevance_query, title, snippet):
+                            _record_provider_rejection(
+                                _collector, relevance_query, variant, provider_name,
+                                url, title, snippet, score,
+                            )
                             continue
-                        if not is_relevant(relevance_query, f"{title}\n{snippet}", "WEB", threshold=MIN_WEB_RERANK_SCORE):
+                        keep = is_relevant(relevance_query, f"{title}\n{snippet}", "WEB", threshold=MIN_WEB_RERANK_SCORE)
+                        safe_record(
+                            _collector,
+                            decision_stage="provider_filter",
+                            decision_reason="accepted" if keep else "below_threshold",
+                            title=title,
+                            url=url,
+                            score_text=f"{title}\n{snippet}",
+                            decision_query=relevance_query,
+                            query_variant=variant,
+                            provider=provider_name,
+                            score_at_decision=score,
+                            threshold_at_decision=MIN_WEB_RERANK_SCORE,
+                            retained=keep,
+                        )
+                        if not keep:
                             continue
                         merged_results[url] = (url, title, snippet, score)
+                        candidate_origins[url] = (provider_name, variant)
                 elif status == "unavailable":
                     slot["unavailable_excs"].append(payload)
                 elif status == "error":
@@ -738,6 +869,11 @@ async def web_search(query: Any, max_results: int = 5) -> str:
                     if not is_relevant(
                         relevance_query, block, "WEB", threshold=MIN_WEB_RERANK_SCORE, idf=corpus_idf
                     ):
+                        _record_merged_web(
+                            _collector, (url, title, snippet, _old), relevance_query,
+                            candidate_origins, "merged_rerank", "below_threshold",
+                            retained=False, idf=corpus_idf,
+                        )
                         continue
                     rescored[url] = (
                         url,
@@ -745,9 +881,29 @@ async def web_search(query: Any, max_results: int = 5) -> str:
                         snippet,
                         evidence_score(relevance_query, block, "WEB", idf=corpus_idf),
                     )
+                    _record_merged_web(
+                        _collector, rescored[url], relevance_query, candidate_origins,
+                        "merged_rerank", "accepted", retained=True, idf=corpus_idf,
+                    )
                 if rescored:
                     merged_results = rescored
+                else:
+                    # Existing behavior restores every original result when the
+                    # IDF pass rejects all; record that without changing scores.
+                    for row in merged_results.values():
+                        _record_merged_web(
+                            _collector, row, relevance_query, candidate_origins,
+                            "fill_back", "restored_after_empty_rerank", retained=True,
+                        )
             ranked = _ordered_results(merged_results, max_results)
+            selected_urls = {row[0] for row in ranked}
+            for row in merged_results.values():
+                if row[0] not in selected_urls:
+                    _record_merged_web(
+                        _collector, row, relevance_query, candidate_origins,
+                        "truncation", "beyond_limit",
+                        payload={"limit": max(1, min(max_results, 10))},
+                    )
             text = "\n\n".join(
                 "\n".join(
                     [

@@ -233,15 +233,20 @@ async def patent_evidence_pack(
     fetch_timeout_ms: int = 18000,
     atomic_requirements: list[dict[str, Any]] | None = None,
     english_query: str = "",
+    *,
+    _collector: Any = None,
 ) -> str:
     """Search for and process patent evidence for the given query."""
+    # Passed only when capture is active, so with capture off the call is
+    # byte-identical to before and existing stubs keep working unchanged.
+    _capture_kwargs = {"_collector": _collector} if _collector is not None else {}
     warnings: list[str] = []
     verification_failed = False
     query = clean_tool_query(query)
     relevance_query = (english_query or "").strip() or query
     search_query = relevance_query
     try:
-        search_raw = await patent_search(query=search_query, max_results=max_results)
+        search_raw = await patent_search(query=search_query, max_results=max_results, **_capture_kwargs)
         search_payload = json.loads(search_raw)
     except Exception as exc:
         return json.dumps(
