@@ -93,6 +93,17 @@ schema handling; production connection/migration helpers are not called. Active
 WAL/SHM/journal companions are rejected. Integrity and file digest are checked,
 including a second digest after reading. Connections close explicitly.
 
+Source-attempt completeness requires an existing stored attempt with
+`status == "ok"`, `completed == 1` and `error_count == 0`. The production writer
+stores the normalized retrieval status in `evidence_results`; `ok_with_hits` and
+`reliable_no_results` are derived acknowledgement statuses, not stored success
+statuses. Hit count is not a completion requirement. `empty_output` additionally
+requires stored `reliable_no_results == 1`, while its candidate pool remains
+unverified. Partial/failing attempts, unfinished attempts and attempts with errors
+retain their traces but cannot qualify for first-attempt provenance eligibility.
+Synthetic fixtures exercise the actual production evidence writer for successful
+hits, reliable no-results and incomplete/failing outcomes.
+
 The bundle includes manifest/snapshot digests, registry, execution declarations
 and stored attempt outcomes, raw events, unreconciled examples and representations.
 Event IDs are `snapshot_sha256:sqlite_row_id`. Every raw column, payload string and

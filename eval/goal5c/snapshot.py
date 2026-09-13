@@ -275,6 +275,17 @@ def _validate_event(event: dict, execution: dict, query: dict) -> None:
         _require(event["retained"] == int(accepted), "stage reason contradicts outcome")
 
 
+def _source_attempt_complete(attempt: dict | None) -> bool:
+    """Use stored retrieval status, not the writer's derived acknowledgement.
+
+    research_session_save_evidence stores normalized status='ok'; only its
+    acknowledgement derives ok_with_hits/reliable_no_results. Completion and
+    absence of errors are separate requirements, independent of hit count.
+    """
+    return bool(attempt and attempt["status"] == "ok" and attempt["completed"] == 1
+                and attempt["error_count"] == 0)
+
+
 def import_snapshot(snapshot: Path, manifest: dict) -> dict:
     """Return a deterministic synthetic bundle; do not label or select documents."""
     validate_manifest(manifest)
@@ -324,8 +335,7 @@ def import_snapshot(snapshot: Path, manifest: dict) -> dict:
         if attempt is not None:
             _require(attempt["run_id"] == execution["run_id"] and attempt["query"] == execution["call_query"],
                      "attempt provenance mismatch")
-        complete = bool(attempt and attempt["status"] == "ok" and attempt["completed"] == 1
-                        and attempt["error_count"] == 0)
+        complete = _source_attempt_complete(attempt)
         if state == "empty_output":
             _require(complete and attempt["reliable_no_results"] == 1, "empty pool lacks completion evidence")
         reasons = []

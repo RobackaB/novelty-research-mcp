@@ -27,6 +27,21 @@ def _rehash(path, manifest):
     manifest["snapshot_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _save_synthetic_attempt(execution, *, with_hits=True, status="ok", completed=True,
+                            reliable_no_results=False, errors=None):
+    """Exercise production normalization and persistence, without providers."""
+    return json.loads(rs.research_session_save_evidence(
+        execution["session_id"], execution["source_type"], {
+            "source_type": execution["source_type"], "status": status,
+            "completed": completed, "reliable_no_results": reliable_no_results,
+            "hits": [{"title": "Fictional document fixture",
+                      "url": "https://example.invalid/synthetic-document",
+                      "summary": "Synthetic first representation"}] if with_hits else [],
+            "errors": errors or [], "warnings": [],
+        }, query=execution["call_query"], attempt=execution["attempt"], run_id=execution["run_id"],
+    ))
+
+
 @pytest.fixture()
 def synthetic_capture(temp_db):
     session_id = "rs_goal5c_synthetic"
@@ -63,12 +78,6 @@ def synthetic_capture(temp_db):
             else:
                 collector.record(**fields, decision_stage="content_gate", decision_reason="below_overlap_gate")
         rs._persist_decision_events(collector)
-        with rs._connect() as conn:
-            conn.execute(
-                "INSERT INTO evidence_results(session_id,run_id,source_type,attempt,query,status,completed,"
-                "created_at,updated_at) VALUES(?,?,?,?,?,'ok',1,'synthetic-time','synthetic-time')",
-                (session_id, run_id, source, attempt, call_query),
-            )
         executions.append({
             "execution_id": run_id, "query_id": "q_synthetic", "session_id": session_id,
             "run_id": run_id, "source_type": source, "attempt": attempt, "envelope": envelope,
@@ -76,6 +85,8 @@ def synthetic_capture(temp_db):
             "capture_status": "cache_only" if source == "patent" and attempt == 2 else "observed",
             "declared_event_count": len(collector.events),
         })
+        ack = _save_synthetic_attempt(executions[-1])
+        assert ack["stored"] is True and ack["evidence_status"] == "ok_with_hits"
     manifest = {
         "schema_version": capture.MANIFEST_VERSION, "protocol_version": PROTOCOL_VERSION,
         "data_class": "synthetic", "batch_id": "synthetic-batch", "capture_commit": CAPTURE_COMMIT,
@@ -118,6 +129,20 @@ def test_retry_representations_and_cache_do_not_enter_fp1(synthetic_capture):
     cache_ids = {row["raw_event_id"] for row in bundle["raw_events"] if row["decision_kind"] == "trace_only"}
     assert cache_ids
     assert not cache_ids.intersection(event for item in bundle["examples"] for event in item["raw_event_ids"])
+
+
+def test_writer_persisted_hits_are_complete_for_fp1(synthetic_capture):
+    bundle = capture.import_snapshot(*synthetic_capture)
+    for execution in bundle["executions"]:
+        assert execution["source_attempt"]["status"] == "ok"
+        assert "incomplete_source_attempt" not in execution["fp1_exclusion_reasons"]
+        if execution["attempt"] == 1:
+            assert execution["fp1_exclusion_reasons"] == []
+    first_events = {row["raw_event_id"] for row in bundle["raw_events"]
+                    if row["captured"]["attempt"] == 1}
+    assert first_events
+    assert first_events == {event for item in bundle["representations"]
+                            for event in item["fp1_provenance_event_ids"]}
 
 
 @pytest.mark.parametrize("field,value", [
@@ -196,7 +221,11 @@ def test_zero_rows_do_not_silently_mean_empty_pool(synthetic_capture, state):
     with closing(sqlite3.connect(path)) as conn, conn:
         conn.execute("DROP TABLE evaluation_candidate_decisions")
         if state == "empty_output":
-            conn.execute("UPDATE evidence_results SET reliable_no_results=1")
+            conn.execute("DELETE FROM evidence_results")
+    if state == "empty_output":
+        for execution in manifest["executions"]:
+            ack = _save_synthetic_attempt(execution, with_hits=False, reliable_no_results=True)
+            assert ack["stored"] is True and ack["evidence_status"] == "reliable_no_results"
     _rehash(path, manifest)
     bundle = capture.import_snapshot(path, manifest)
     assert bundle["raw_events"] == bundle["examples"] == []
@@ -204,16 +233,58 @@ def test_zero_rows_do_not_silently_mean_empty_pool(synthetic_capture, state):
         assert state in item["fp1_exclusion_reasons"]
         if state == "empty_output":
             assert "unverified_empty_pool" in item["fp1_exclusion_reasons"]
+            assert "incomplete_source_attempt" not in item["fp1_exclusion_reasons"]
+            assert item["source_attempt"]["status"] == "ok"
+            assert item["source_attempt"]["completed"] == 1
+            assert item["source_attempt"]["reliable_no_results"] == 1
 
 
-def test_partial_source_retains_events_without_fp1_eligibility(synthetic_capture):
+@pytest.mark.parametrize("status,completed,errors", [
+    ("partial_failure", False, [{"type": "synthetic_failure"}]),
+    ("partial_failure", True, []),
+    ("failed", True, []),
+    ("ok", False, []),
+    ("ok", True, [{"type": "synthetic_failure"}]),
+])
+def test_partial_source_retains_events_without_fp1_eligibility(synthetic_capture, status, completed, errors):
     path, manifest = synthetic_capture
     with closing(sqlite3.connect(path)) as conn, conn:
-        conn.execute("UPDATE evidence_results SET status='partial_failure', completed=0, error_count=1")
+        conn.execute("DELETE FROM evidence_results")
+    for execution in manifest["executions"]:
+        ack = _save_synthetic_attempt(execution, status=status, completed=completed, errors=errors)
+        assert ack["stored"] is True
     _rehash(path, manifest)
     bundle = capture.import_snapshot(path, manifest)
     assert len(bundle["raw_events"]) == 6
+    assert all("incomplete_source_attempt" in item["fp1_exclusion_reasons"] for item in bundle["executions"])
     assert all(not item["fp1_provenance_event_ids"] for item in bundle["representations"])
+
+
+@pytest.mark.parametrize("status", ["ok_with_hits", "reliable_no_results"])
+def test_acknowledgement_status_does_not_certify_stored_completion(synthetic_capture, status):
+    path, manifest = synthetic_capture
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute("UPDATE evidence_results SET status=?", (status,))
+    _rehash(path, manifest)
+    bundle = capture.import_snapshot(path, manifest)
+    assert all("incomplete_source_attempt" in item["fp1_exclusion_reasons"] for item in bundle["executions"])
+    assert all(not item["fp1_provenance_event_ids"] for item in bundle["representations"])
+
+
+@pytest.mark.parametrize("empty_output", [False, True])
+def test_acknowledgement_status_confusion_negative_control(synthetic_capture, monkeypatch, empty_output):
+    # Inject the proposed status substitution: both real-writer success oracles
+    # must detect it. The existing status='ok' predicate is not itself defective.
+    monkeypatch.setattr(capture, "_source_attempt_complete", lambda attempt: bool(
+        attempt and attempt["status"] in {"ok_with_hits", "reliable_no_results"}
+        and attempt["completed"] == 1 and attempt["error_count"] == 0
+    ))
+    if empty_output:
+        with pytest.raises(ContractError, match="completion evidence"):
+            test_zero_rows_do_not_silently_mean_empty_pool(synthetic_capture, "empty_output")
+    else:
+        with pytest.raises(AssertionError):
+            test_writer_persisted_hits_are_complete_for_fp1(synthetic_capture)
 
 
 @pytest.mark.parametrize("content", ['{"x":1,"x":2}', '{"x":NaN}', '{"x":Infinity}'])
