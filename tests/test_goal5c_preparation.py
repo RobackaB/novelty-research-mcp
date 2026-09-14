@@ -273,6 +273,30 @@ def test_opaque_item_ids_and_order_ignore_plan_row_order(prepared_inputs):
     assert reseeded["items"][0]["item_id"] != worksheet["items"][0]["item_id"]
 
 
+@pytest.mark.parametrize("ending", ["\n", "\r\n"])
+def test_equivalent_span_plans_preserve_worksheet_and_inventory(prepared_inputs, ending):
+    path, manifest, _ = prepared_inputs
+    text = "A" + ending + "B" + ending
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute("UPDATE evaluation_candidate_decisions SET score_text=? WHERE id=1", (text,))
+    _rehash(path, manifest)
+    bundle = prep.import_snapshot(path, manifest)
+    plan = make_plan(bundle)
+    worksheet, analyst = prep.prepare_snapshot(path, manifest, plan)
+    assert worksheet["items"][0]["content"] == text
+    representation = next(row for row in bundle["representations"] if row["score_text"] == text)
+    for first_end in (1, 1 + len(ending)):
+        segmented = deepcopy(plan)
+        review = next(row for row in segmented["projection_reviews"]
+                      if row["representation_id"] == representation["representation_id"])
+        review["content_spans"] = [[0, first_end], [text.index("B"), len(text)]]
+        changed_worksheet, changed_analyst = prep.prepare_snapshot(path, manifest, segmented)
+        assert canonical_json_bytes(changed_worksheet) == canonical_json_bytes(worksheet)
+        assert changed_analyst["first_attempt_inventory"] == analyst["first_attempt_inventory"]
+        assert changed_analyst["preparation_plan_sha256"] != analyst["preparation_plan_sha256"]
+        assert review in changed_analyst["projection_reviews"]
+
+
 def test_cli_regenerates_separate_artifacts_across_hash_seeds(prepared_inputs, tmp_path):
     path, manifest, plan = prepared_inputs
     manifest_path, plan_path = tmp_path / "manifest.json", tmp_path / "plan.json"

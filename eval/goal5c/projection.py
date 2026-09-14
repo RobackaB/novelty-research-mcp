@@ -61,13 +61,20 @@ def validate_visible_text(text: str) -> None:
         raise ContractError("visible text contains system metadata")
 
 
+def _render_gap(gap: str) -> str:
+    """Preserve source whitespace; mark only omissions containing other text."""
+    return PROJECTION_SEPARATOR if gap.strip(" \t\r\n") else gap
+
+
 def project_text(text: str, spans: list[list[int]]) -> str:
     """Select ordered, nonoverlapping complete lines by Unicode character index.
 
     Ranges are half-open. A range starts at zero or immediately after LF and ends
     at EOF, immediately before LF (before CR for CRLF), or immediately after LF.
     Whole-line selection prevents retaining just a metadata value after deleting
-    its label. Selected substrings are unchanged; gaps use a fixed separator.
+    its label. Touching spans and whitespace-only gaps coalesce, preserving
+    exact source separators. Only gaps containing other text use the omission
+    separator, so splitting equivalent selections cannot fabricate omissions.
     An empty span list explicitly projects no evidence.
     """
     _validate_text(text)
@@ -92,8 +99,10 @@ def project_text(text: str, spans: list[list[int]]) -> str:
             raise ContractError("projection must select complete lines")
         piece = text[start:end]
         validate_visible_text(piece)
+        if previous_end >= 0:
+            pieces.append(_render_gap(text[previous_end:start]))
         pieces.append(piece)
         previous_end = end
-    result = PROJECTION_SEPARATOR.join(pieces)
+    result = "".join(pieces)
     validate_visible_text(result)
     return result

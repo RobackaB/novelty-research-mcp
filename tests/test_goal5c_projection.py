@@ -32,6 +32,51 @@ def test_complete_crlf_line_may_include_or_exclude_terminator(end):
     assert project_text(text, [[0, end]]) == text[:end]
 
 
+@pytest.mark.parametrize("ending", ["\n", "\r\n"])
+@pytest.mark.parametrize("include_terminator", [False, True])
+@pytest.mark.parametrize("blank_gap", ["", "\n", "\r\n\t \r\n"])
+def test_segmented_selection_has_one_canonical_rendering(ending, include_terminator, blank_gap):
+    text = "A" + ending + blank_gap + "B" + ending
+    second = text.index("B")
+    first_end = 1 + len(ending) if include_terminator else 1
+    assert project_text(text, [[0, first_end], [second, len(text)]]) == project_text(text, [[0, len(text)]]) == text
+
+
+@pytest.mark.parametrize("ending", ["\n", "\r\n"])
+def test_multiple_touching_spans_preserve_original_line_separators(ending):
+    text = ending.join(["A", "B", "C", ""])
+    width = 1 + len(ending)
+    assert project_text(text, [[0, width], [width, 2 * width], [2 * width, len(text)]]) == text
+
+
+@pytest.mark.parametrize("ending", ["\n", "\r\n"])
+def test_genuine_omitted_line_still_has_one_marker(ending):
+    text = "A" + ending + "Omitted evidence." + ending + "B" + ending
+    assert project_text(text, [[0, 1], [text.index("B"), len(text)]]) == (
+        "A" + PROJECTION_SEPARATOR + "B" + ending
+    )
+
+
+@pytest.mark.parametrize("ending", ["\n", "\r\n"])
+def test_coalescing_cannot_expose_selected_metadata(ending):
+    text = "A" + ending + "SOURCE: OpenAlex" + ending
+    with pytest.raises(ContractError, match="system metadata"):
+        project_text(text, [[0, 1], [text.index("SOURCE"), len(text)]])
+
+
+@pytest.mark.parametrize("ending", ["\n", "\r\n"])
+def test_omitted_metadata_is_not_restored_by_coalescing(ending):
+    text = "A" + ending + "SOURCE: OpenAlex" + ending + "B"
+    assert project_text(text, [[0, 1], [text.index("B"), len(text)]]) == "A" + PROJECTION_SEPARATOR + "B"
+
+
+def test_gap_canonicalization_negative_control(monkeypatch):
+    test_segmented_selection_has_one_canonical_rendering("\n", True, "")
+    monkeypatch.setattr(projection, "_render_gap", lambda _gap: PROJECTION_SEPARATOR)
+    with pytest.raises(AssertionError):
+        test_segmented_selection_has_one_canonical_rendering("\n", True, "")
+
+
 @pytest.mark.parametrize("line", [
     "Local rerank score: 8.0/10.",
     "Local rerank score for this publication: 8.0/10.",

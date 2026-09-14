@@ -87,8 +87,16 @@ and within the original string. Each selects complete LF-delimited lines: a star
 is zero or immediately after LF; an end is EOF, before the line terminator or
 immediately after LF. CRLF is supported without splitting the pair.
 
-Selected substrings retain their exact contents, case and spacing. Separate spans
-are joined with `\n[…]\n`; the original ranges remain in the analyst audit.
+Selected substrings retain their exact contents, case and spacing. Touching spans
+and gaps containing only spaces, tabs or LF/CRLF line endings coalesce, preserving
+the exact source whitespace. Equivalent segmentations therefore render identically:
+`"A\nB\n"` with `[[0, 2], [2, 4]]` or `[[0, 1], [2, 4]]` renders exactly like
+`[[0, 4]]`, without an omission marker. CRLF pairs remain intact, and blank-line
+gaps retain their original spacing. Only gaps containing other characters are
+replaced with `\n[…]\n`. Leading/trailing unselected text is not restored; the
+canonical behavior concerns gaps between selections. Original review ranges remain
+in the analyst audit, so review-plan checksums may differ even when visible
+evidence is identical.
 There is no LLM rewriting, summarization or automatic semantic redaction.
 
 `validate_visible_text(text)` checks topic cards, translations, projected titles,
