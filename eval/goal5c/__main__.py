@@ -11,6 +11,8 @@ from .contracts import (
     validate_measurement_inputs,
 )
 from .snapshot import import_snapshot, load_json, validate_manifest
+from .preparation import prepare_snapshot
+from .contracts import sha256_json
 
 
 def write_bundle(path: Path, value: dict) -> None:
@@ -28,6 +30,22 @@ def write_bundle(path: Path, value: dict) -> None:
         raise ContractError("cannot create output; existing artifacts are never overwritten") from exc
 
 
+def write_preparation(directory: Path, worksheet: dict, analyst: dict) -> None:
+    """Create a new external artifact directory, sealed only after both writes."""
+    directory = directory.resolve()
+    if not directory.parent.is_dir() or any((parent / ".git").exists() for parent in directory.parents):
+        raise ContractError("output must be outside Git worktrees")
+    try:
+        directory.mkdir()
+    except OSError as exc:
+        raise ContractError("preparation output directory must be new") from exc
+    write_bundle(directory / "analyst-only.json", analyst)
+    write_bundle(directory / "worksheet.json", worksheet)
+    write_bundle(directory / "COMPLETE.json", {
+        "worksheet_sha256": sha256_json(worksheet), "analyst_sha256": sha256_json(analyst),
+    })
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -42,6 +60,11 @@ def main(argv: list[str] | None = None) -> int:
     inputs.add_argument("--measurement", required=True, type=Path)
     inputs.add_argument("--bundle", required=True, type=Path)
     inputs.add_argument("--truth", required=True, type=Path)
+    prepare = commands.add_parser("prepare-synthetic", help="prepare reviewed synthetic candidates and blank worksheets")
+    prepare.add_argument("--manifest", required=True, type=Path)
+    prepare.add_argument("--snapshot", required=True, type=Path)
+    prepare.add_argument("--plan", required=True, type=Path)
+    prepare.add_argument("--output-dir", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
         if args.command == "validate":
@@ -52,6 +75,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "validate-inputs":
             validate_measurement_inputs(load_json(args.measurement), load_json(args.bundle), load_json(args.truth))
             print("Synthetic input references valid; no metrics or workflow selection verified.")
+        elif args.command == "prepare-synthetic":
+            worksheet, analyst = prepare_snapshot(args.snapshot, load_json(args.manifest), load_json(args.plan))
+            write_preparation(args.output_dir, worksheet, analyst)
+            print(f"Synthetic preparation created: {len(worksheet['items'])} blank items. "
+                  "Only worksheet.json is for annotators; no labels or metrics computed.")
         else:
             bundle = import_snapshot(args.snapshot, load_json(args.manifest))
             write_bundle(args.output, bundle)
