@@ -149,6 +149,9 @@ in later phases. Re-import the original snapshot to audit a bundle's provenance.
 
 ## Limitations and next boundary
 
+[Phase 2 synthetic preparation](goal5c-synthetic-preparation.md) adds reviewed
+candidate inventories and blank blinded worksheets while retaining these limits.
+
 A synthetic declaration is an attestation, not automatic PII detection or proof
 of origin. Checksums detect mismatched artifacts; they do not authenticate a
 self-declared commit. No real-study input is enabled even if operational privacy
