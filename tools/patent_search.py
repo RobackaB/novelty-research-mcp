@@ -17,6 +17,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from ._ttl_cache import TTLCache
+from ._provider_errors import provider_error_message
 from .output_cleaner import USER_AGENT, trim_words
 from .patent_filters import extract_patent_number
 from .decision_capture import _warn_capture_failure, capture_scope, safe_record
@@ -734,11 +735,12 @@ async def patent_search(query: str, max_results: int = 10, *, _collector: Any = 
             elif status == "unavailable":
                 LOGGER.info("patent_search provider=%s skipped: %s", provider_name, payload)
             elif status == "error":
+                error_message = provider_error_message(payload)
                 LOGGER.info(
                     "patent_search provider=%s variant=%r failed: %s",
-                    provider_name, variant[:60], payload,
+                    provider_name, variant[:60], error_message,
                 )
-                errors.append({"provider": provider_name, "message": str(payload)})
+                errors.append({"provider": provider_name, "message": error_message})
 
         for provider_name, slot in provider_status.items():
             if slot["ok"] > 0:

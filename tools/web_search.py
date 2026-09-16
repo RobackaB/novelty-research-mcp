@@ -17,6 +17,7 @@ from bs4 import BeautifulSoup
 from .chromium_scraper import fetch_page_html
 from .jina_reader import fetch_via_jina
 from .output_cleaner import BLOCKED_WEB_DOMAINS, USER_AGENT, clean_output, format_error, trim_words
+from ._provider_errors import provider_error_message
 from .decision_capture import capture_scope, safe_record, _warn_capture_failure
 from .relevance import build_corpus_idf, evidence_score, is_relevant, salient_query_tokens, tokens
 from .requirement_match import unique_coverage_tokens
@@ -843,7 +844,7 @@ async def web_search(query: Any, max_results: int = 5, *, _collector: Any = None
                     slot["errors"].append(payload)
                     merged_failures.append(payload)
                     provider_errors.append(
-                        {"type": f"{provider_name}_web_search_failure", "message": str(payload)}
+                        {"type": f"{provider_name}_web_search_failure", "message": provider_error_message(payload)}
                     )
 
             for provider_name, _provider in SEARCH_PROVIDERS:
@@ -982,7 +983,7 @@ async def web_search(query: Any, max_results: int = 5, *, _collector: Any = None
             "TOOL_ERROR: web_search\nREASON: API-backed web retrieval did not complete.\nWeb search incomplete; no reliable negative web conclusion can be made.",
         )
     except Exception as exc:
-        return format_error("web_search", str(exc))
+        return format_error("web_search", provider_error_message(exc))
 
 async def web_fetch(url: str, timeout_ms: int = FETCH_TOTAL_TIMEOUT_MS, query: str = "") -> str:
     """Fetch a web page and return its cleaned text content."""
