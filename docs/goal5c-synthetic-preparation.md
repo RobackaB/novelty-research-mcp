@@ -204,6 +204,9 @@ of origin. Do not distribute the directory wholesale: **deliver only
 
 ## Remaining phases and limits
 
+[Implementation Phase 3](goal5c-synthetic-freeze.md) adds a synthetic
+preregistration/roster-freeze rehearsal; it does not conduct the gated pilot.
+
 Later work must establish complete-pool/scorer-input eligibility and any defensible
 workflow reconstruction; add independent assessor submissions and adjudication;
 and implement frozen analysis, uncertainty and robustness reports. Real pilot,
