@@ -15,6 +15,7 @@ import httpx
 from .alphaxiv_client import discover_papers as alphaxiv_discover_papers
 from .arxiv_search import arxiv_search
 from .output_cleaner import USER_AGENT, clean_output, format_error, trim_words
+from ._provider_errors import provider_error_message
 from .decision_capture import _warn_capture_failure, capture_scope, safe_record
 from .relevance import (
     _MIN_CORPUS_FOR_IDF, build_corpus_idf, discriminative_tokens, evidence_score,
@@ -1253,7 +1254,7 @@ async def _publications_search(
         rate_limited = False
         if isinstance(s2_outcome, BaseException):
             primary_errored = True
-            provider_errors.append(f"semantic_scholar: {s2_outcome}")
+            provider_errors.append(f"semantic_scholar: {provider_error_message(s2_outcome)}")
         else:
             s2_blocks, primary_errored, rate_limited = s2_outcome
             if primary_errored:
@@ -1261,31 +1262,31 @@ async def _publications_search(
 
         cr_blocks: list[tuple[float, str]] = []
         if isinstance(cr_outcome, BaseException):
-            provider_errors.append(f"crossref: {cr_outcome}")
+            provider_errors.append(f"crossref: {provider_error_message(cr_outcome)}")
         else:
             cr_blocks = cr_outcome
 
         ax_blocks: list[tuple[float, str]] = []
         if isinstance(ax_outcome, BaseException):
-            provider_errors.append(f"alphaxiv: {ax_outcome}")
+            provider_errors.append(f"alphaxiv: {provider_error_message(ax_outcome)}")
         else:
             ax_blocks = ax_outcome
 
         pubmed_blocks: list[tuple[float, str]] = []
         if isinstance(pubmed_outcome, BaseException):
-            provider_errors.append(f"pubmed: {pubmed_outcome}")
+            provider_errors.append(f"pubmed: {provider_error_message(pubmed_outcome)}")
         else:
             pubmed_blocks = pubmed_outcome
 
         openalex_blocks: list[tuple[float, str]] = []
         if isinstance(openalex_outcome, BaseException):
-            provider_errors.append(f"openalex: {openalex_outcome}")
+            provider_errors.append(f"openalex: {provider_error_message(openalex_outcome)}")
         else:
             openalex_blocks = openalex_outcome
 
         arxiv_blocks: list[tuple[float, str]] = []
         if isinstance(arxiv_outcome, BaseException):
-            provider_errors.append(f"arxiv: {arxiv_outcome}")
+            provider_errors.append(f"arxiv: {provider_error_message(arxiv_outcome)}")
         else:
             arxiv_blocks = arxiv_outcome
 
@@ -1420,6 +1421,7 @@ async def _publications_search(
             "No clearly relevant publication results with abstracts matched the requested query.",
         )
     except Exception as exc:
+        error_message = provider_error_message(exc)
         try:
             search_queries = section_query_variants(query, "PUBLICATION_QUERIES", max_variants=2, legacy_marker="publication search queries")
             if search_queries == [(query or "").strip()]:
@@ -1434,7 +1436,7 @@ async def _publications_search(
                 selected_blocks = crossref_blocks[:max(1, min(max_results, 20))]
                 _capture_selection(crossref_blocks, max(1, min(max_results, 20)), relevance_query)
                 return _publication_partial(
-                    f"Semantic Scholar failed ({exc}); Crossref supplied partial relevant records.",
+                    f"Semantic Scholar failed ({error_message}); Crossref supplied partial relevant records.",
                     clean_output("\n\n".join(block for _score, block in selected_blocks)),
                 )
             try:
@@ -1446,13 +1448,13 @@ async def _publications_search(
                 selected_blocks = alpha_blocks[:max(1, min(max_results, 20))]
                 _capture_selection(alpha_blocks, max(1, min(max_results, 20)), relevance_query)
                 return _publication_partial(
-                    f"Semantic Scholar failed ({exc}); AlphaXiv supplied partial relevant records.",
+                    f"Semantic Scholar failed ({error_message}); AlphaXiv supplied partial relevant records.",
                     clean_output("\n\n".join(block for _score, block in selected_blocks)),
                 )
             _arxiv_executed_query = query
             fallback = await arxiv_search(_arxiv_executed_query, max_results)
             if _looks_failed(fallback):
-                return _publication_failure(f"Semantic Scholar failed ({exc}) and Crossref/ArXiv fallbacks also failed or were rate-limited.")
+                return _publication_failure(f"Semantic Scholar failed ({error_message}) and Crossref/ArXiv fallbacks also failed or were rate-limited.")
             filtered = _filter_publication_text(
                 query,
                 fallback,
@@ -1461,16 +1463,18 @@ async def _publications_search(
                 _executed_query=_arxiv_executed_query,
             )
             if not filtered:
+                # Preserve the existing decision on the original exception;
+                # only emitted diagnostics use the safe rendering above.
                 if _looks_failed(str(exc)):
-                    return _publication_failure(f"Semantic Scholar failed ({exc}) and Crossref/ArXiv fallbacks returned no usable relevant records.")
+                    return _publication_failure(f"Semantic Scholar failed ({error_message}) and Crossref/ArXiv fallbacks returned no usable relevant records.")
                 return _publication_partial(
-                    f"Semantic Scholar failed ({exc}) and Crossref/ArXiv fallbacks yielded no usable relevant records.",
+                    f"Semantic Scholar failed ({error_message}) and Crossref/ArXiv fallbacks yielded no usable relevant records.",
                     "Publication search incomplete; Crossref/ArXiv fallbacks yielded no usable relevant records. Do not treat this as evidence that no relevant publications exist.",
                 )
             return _publication_partial(
-                f"Semantic Scholar failed ({exc}); ArXiv fallback supplied partial relevant records.",
-                f"Semantic Scholar search failed because {exc}, so ArXiv fallback results are returned instead.\n"
+                f"Semantic Scholar failed ({error_message}); ArXiv fallback supplied partial relevant records.",
+                f"Semantic Scholar search failed because {error_message}, so ArXiv fallback results are returned instead.\n"
                 f"{filtered}",
             )
         except Exception:
-            return format_error("publications_search", str(exc))
+            return format_error("publications_search", error_message)

@@ -19,6 +19,8 @@ from typing import Any
 from mcp import ClientSession
 from mcp.types import CallToolResult
 
+from ._provider_errors import provider_error_message
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -128,5 +130,5 @@ async def discover_papers(query: str, timeout_s: float = ALPHAXIV_TIMEOUT_S) -> 
     try:
         return await asyncio.wait_for(_run(), timeout=timeout_s)
     except Exception as exc:
-        LOGGER.info("alphaxiv discover_papers failed: %s", exc)
+        LOGGER.info("alphaxiv discover_papers failed: %s", provider_error_message(exc))
         return []
