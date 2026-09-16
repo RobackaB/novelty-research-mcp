@@ -13,6 +13,7 @@ from .contracts import (
 from .snapshot import import_snapshot, load_json, validate_manifest
 from .preparation import prepare_snapshot
 from .contracts import sha256_json
+from .freeze import freeze_registry
 
 
 def write_bundle(path: Path, value: dict) -> None:
@@ -65,6 +66,10 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--snapshot", required=True, type=Path)
     prepare.add_argument("--plan", required=True, type=Path)
     prepare.add_argument("--output-dir", required=True, type=Path)
+    freeze = commands.add_parser("freeze-synthetic", help="rehearse a preregistered original-query roster")
+    freeze.add_argument("--registry", required=True, type=Path)
+    freeze.add_argument("--plan", required=True, type=Path)
+    freeze.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
         if args.command == "validate":
@@ -80,6 +85,12 @@ def main(argv: list[str] | None = None) -> int:
             write_preparation(args.output_dir, worksheet, analyst)
             print(f"Synthetic preparation created: {len(worksheet['items'])} blank items. "
                   "Only worksheet.json is for annotators; no labels or metrics computed.")
+        elif args.command == "freeze-synthetic":
+            frozen = freeze_registry(load_json(args.registry), load_json(args.plan))
+            write_bundle(args.output, frozen)
+            print(f"Synthetic roster created: {len(frozen['pilot_queries'])} pilot originals, "
+                  f"{len(frozen['discovery_queries'])} discovery originals, "
+                  f"{len(frozen['ordered_reserves'])} reserves. Real execution remains disabled.")
         else:
             bundle = import_snapshot(args.snapshot, load_json(args.manifest))
             write_bundle(args.output, bundle)
