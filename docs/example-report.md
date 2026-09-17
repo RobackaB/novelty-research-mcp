@@ -9,8 +9,10 @@ It was generated **without any API keys configured**, and while the keyless pate
 provider was rate-limited by its upstream. Web retrieval therefore returned nothing and
 the patent results come from the fallback provider only. The report reflects that
 honestly: the verdict is `partial_retrieval` with `low` confidence, and the missing
-source is reported as incomplete rather than as an absence of prior art. With search
-keys configured, source quality and the verdict improve accordingly.
+source is reported as incomplete rather than as an absence of prior art. Search
+keys can enable additional retrieval paths; they do not guarantee better evidence
+or a different verdict. This historical example predates the 0.10.0 milestone and
+is preserved verbatim below, rather than presented as a newly validated run.
 
 ---
 

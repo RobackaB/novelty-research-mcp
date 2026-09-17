@@ -1,155 +1,88 @@
-# Flowise MCP Research Server
+# Novelty Research MCP
 
-Tento balík obsahuje finálny prototyp MCP servera a exportovanú Flowise architektúru použitú v práci. Systém slúži na predbežný prieskum stavu techniky z patentových, publikačných a webových zdrojov.
+Python MCP backend na predbežný prieskum stavu techniky z patentových,
+publikačných a webových zdrojov. SQLite uchováva pokusy o vyhľadávanie a dôkazy;
+Python zabezpečuje hodnotenie relevancie, spracovanie dôkazov a zostavenie správy.
+Flowise koordinuje volania nástrojov pomocou jazykového modelu.
 
-*[English README](README.md)*
+Projekt vznikol ako bakalárska práca **AI for Advanced Information Research**.
+Tag `v1.0-thesis` zachováva odovzdaný prototyp. Verzia **0.10.0** je portfóliový
+míľnik po technickom audite, nie tvrdenie o pripravenosti na produkčné nasadenie.
 
-> **O tomto repozitári**
->
-> Tag `v1.0-thesis` označuje kód presne v tom stave, v akom bol odovzdaný ako
-> bakalárska práca — bez akýchkoľvek dodatočných úprav. Ďalšie commity sú
-> vylepšenia, ktoré na tomto základe postupne pribúdajú (opravy chýb, testovacia
-> sada, meranie kvality výstupu). Vývoj tak zostáva dohľadateľný od pôvodnej
-> odovzdanej verzie.
+[English README](README.md) · [Ukážka správy](docs/example-report.md) ·
+[Technický audit](AUDIT.md) · [Overenie míľnika](docs/portfolio-milestone.md)
 
+## Čo pribudlo po práci
 
-## Čo je v balíku
+- Deterministické rozhodovanie pri rovnakých skóre, regresné testy a negatívne kontroly.
+- Pasívny záznam rozhodnutí o kandidátoch a pôvodu dotazu bez vplyvu na vyhľadávanie.
+- Ochrana diagnostiky poskytovateľov pred kopírovaním prihlasovacích údajov.
+- Syntetická offline infraštruktúra Goal 5C: import SQLite snapshotu iba na čítanie,
+  explicitné zosúladenie identít, prázdne zaslepené hárky a deterministický výber dotazov.
 
-- `server_http.py` - HTTP vstup pre MCP server používaný pri Docker spustení.
-- `server.py` - registrácia MCP nástrojov.
-- `terminal_ui.py` - terminálový štartovací banner pre HTTP server.
-- `tools/` - implementácia vyhľadávacích, ukladacích, overovacích a hodnotiacich nástrojov.
-- `docker-compose.yml` - spoločné spustenie Flowise a MCP servera.
-- `Dockerfile` - obraz MCP servera.
-- `.env.example` - vzor konfiguračného súboru bez tajných kľúčov.
-- `flowise_architecture/Flowise_agent.json` - finálna Flowise architektúra.
-- `flowise_baselines/` - jednoduchšie RAG architektúry použité iba na porovnanie.
+Backend poskytuje sedem MCP nástrojov. Ich rozhrania kontrolujú testy; aktuálny
+základ má **954 testov** a CI pre Python 3.11–3.13. Determinizmus sa vzťahuje na
+rovnaké vstupy a konfiguráciu, nie na meniace sa výsledky externých služieb.
 
-Na beh finálneho systému je potrebný hlavne súbor `flowise_architecture/Flowise_agent.json`. Súbory v `flowise_baselines/` nie sú potrebné na spustenie finálnej verzie.
+## Najprv offline overenie
 
-## Požiadavky
+Nie sú potrebné API kľúče, Docker ani účet jazykového modelu. Inštalácia závislostí
+vyžaduje internet. V PowerShelli:
 
-Pred spustením potrebujete:
+```powershell
+git clone https://github.com/RobackaB/novelty-research-mcp.git
+cd novelty-research-mcp
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+python -m pytest -q
+python -m eval.relevance_eval
+python -m eval.goal5c --help
+```
 
-- nainštalovaný a spustený Docker Desktop,
-- vlastný OpenAI API kľúč nastavený vo Flowise po importe architektúry,
-- vlastné API kľúče v súbore `.env`, ak chcete plnohodnotné vyhľadávanie.
+Na Linuxe/macOS aktivujte prostredie cez `source .venv/bin/activate`.
+Príkazy `eval` spúšťajte z koreňa repozitára: nie sú súčasťou serverového wheel
+balíka ani runtime Docker obrazu. Goal 5C používa syntetické vstupy; príklady sú
+v [dokumentácii](docs/goal5c-offline-foundation.md) a testoch. Generované dáta
+nepatria do Gitu.
 
-Odporúčané API kľúče:
+## Meranie a hranice
 
-- `GOOGLE_CSE_API_KEY`
-- `GOOGLE_CSE_ID`
-- `TAVILY_API_KEY`
-- `EXA_API_KEY`
-- `SEMANTIC_SCHOLAR_API_KEY`
+Historický benchmark obsahuje **3 dotazy a 20 kandidátov**. Ide o regresné meranie
+generického skórovania na pevnej množine kandidátov, nie o meranie celého workflow.
+Makro priemery po dotazoch sú precision **0.611**, recall **0.833**, F1 **0.683**.
+Taká malá, čiastočne autorom zostavená vzorka nepreukazuje všeobecnú účinnosť,
+percentuálne zlepšenie ani globálnu úplnosť vyhľadávania.
 
-`GOOGLE_CSE_API_KEY` a `GOOGLE_CSE_ID` sú dôležité pre primárne webové vyhľadávanie. `TAVILY_API_KEY` a `EXA_API_KEY` zlepšujú webové a patentové fallback vyhľadávanie. `SEMANTIC_SCHOLAR_API_KEY` zlepšuje limity pri vyhľadávaní odborných publikácií.
+Goal 5C fázy 1–3 sú implementované iba ako syntetická infraštruktúra. Skutočný pilot,
+25–30 pôvodných informačných potrieb, ľudské označovanie/adjudikácia, metriky workflow
+a prospektívne potvrdenie prahov zostávajú budúcim výskumom. Fáza 4 sa nezačala.
 
-## Rýchle spustenie
+Systém pomáha s prieskumom; nedokazuje novosť ani patentovateľnosť. Chýbajúci výsledok
+pri blokovaní poskytovateľa alebo zlyhaní sťahovania neznamená neexistenciu riešenia.
 
-1. Otvorte terminál v priečinku projektu.
+## Voliteľné lokálne demo
 
-2. Vytvorte lokálny konfiguračný súbor:
+Použite Docker Desktop a verziu Flowise pripnutú v Compose. Rozsah skutočne
+vykonaného overenia je uvedený v [zázname míľnika](docs/portfolio-milestone.md#verification).
+Pre živé volania modelu nastavte vlastný OpenAI credential vo Flowise.
+Voliteľné kľúče poskytovateľov sú popísané v `.env.example`.
 
 ```powershell
 Copy-Item .env.example .env
-```
-
-3. Otvorte `.env` a doplňte vlastné API kľúče.
-
-4. Spustite služby:
-
-```powershell
 docker compose up --build
 ```
 
-Po úspešnom spustení budú dostupné:
+Otvorte `http://localhost:3000`, vytvorte/otvorte **Agentflow V2** a cez nastavenia (Load Agents) importujte
+`flowise_architecture/Flowise_agent.json`. Nastavte model a credential.
+Pre služby v Compose nastavte URL Custom MCP na
+`http://mcp-research-server:8000/mcp`; historický export používa `host.docker.internal`.
+Podrobný postup a riešenie problémov sú v [anglickom README](README.md#optional-local-flowise-demo).
 
-- Flowise: `http://localhost:3000`
-- MCP server: `http://localhost:8000/mcp`
+Ide o dôveryhodné lokálne demo. MCP server nemá autentifikáciu verejnej služby;
+kontroly host/origin ju nenahrádzajú. Nevystavujte služby priamo internetu a
+nepoužívajte citlivé vstupy. Dotazy a dôkazy sa ukladajú, niektoré URL sa logujú.
 
-Pri štarte MCP server vypíše do terminálu aj adresu pre Flowise Custom MCP konfiguráciu.
-
-## Import Flowise architektúry
-
-1. Otvorte Flowise na adrese:
-
-```text
-http://localhost:3000
-```
-
-2. Importujte súbor:
-
-```text
-flowise_architecture/Flowise_agent.json
-```
-
-3. Ak Flowise po importe vyžaduje credentials, nastavte vlastný OpenAI API kľúč pre použitý jazykový model.
-
-4. Skontrolujte Custom MCP konfiguráciu. Exportovaná architektúra používa adresu:
-
-```text
-http://host.docker.internal:8000/mcp
-```
-
-Táto adresa je vhodná pri spustení cez Docker Desktop, pretože Flowise kontajner sa cez ňu pripája na MCP server vystavený na porte `8000`.
-
-## Testovací dotaz
-
-Po importe architektúry zadajte vlastný opis riešenia. Dotaz môže byť po slovensky alebo po anglicky.
-
-```text
-Over, či už existuje [stručný opis riešenia, jeho účelu, technických prvkov, spôsobu fungovania a výsledku, ktorý má dosiahnuť].
-```
-
-Pri správnom nastavení by mal workflow postupne volať najmä tieto MCP nástroje:
-
-- `research_session_start`
-- `research_session_understand_query`
-- `patent_evidence_to_session`
-- `publication_evidence_to_session`
-- `web_evidence_to_session`
-- `research_session_checklist`
-- `research_session_user_answer`
-
-## Overenie spustenia
-
-Ak Flowise nevracia odpoveď alebo workflow hlási chybu:
-
-- skontrolujte, že bežia oba kontajnery,
-- skontrolujte, že MCP server je dostupný na `http://localhost:8000/mcp`,
-- skontrolujte, že Custom MCP konfigurácia vo Flowise používa `http://host.docker.internal:8000/mcp`,
-- skontrolujte, že v `.env` sú doplnené API kľúče,
-- skontrolujte, že vo Flowise je nastavený OpenAI credential.
-
-Stav kontajnerov zobrazíte príkazom:
-
-```powershell
-docker compose ps
-```
-
-Logy zobrazíte príkazom:
-
-```powershell
-docker compose logs -f
-```
-
-## Zastavenie
-
-Kontajnery zastavíte príkazom:
-
-```powershell
-docker compose down
-```
-
-Ak chcete vymazať aj uložené dáta Flowise a SQLite databázu z testovania:
-
-```powershell
-docker compose down -v
-```
-
-## Poznámky k dátam
-
-Flowise dáta sú uložené v Docker volume `flowise_data`. SQLite databáza prieskumov je uložená v Docker volume `mcp_research_data` na ceste `/app/data/research_sessions.sqlite3`.
-
-Príkaz `docker compose down` dáta ponechá. Príkaz `docker compose down -v` tieto volumes odstráni.
+`docker compose down` ponechá dáta vo volumes `flowise_data` a `mcp_research_data`.
+`docker compose down -v` ich odstráni. Stav a logy skontrolujete cez
+`docker compose ps` a `docker compose logs`.

@@ -1,5 +1,12 @@
 # In-depth audit and improvements — Flowise MCP Research Server (v0.9.4)
 
+> **0.10.0 milestone context.** This is a historical audit; its version labels,
+> test counts and observations describe the recorded stages, not the current
+> release. Later determinism hardening, passive capture, synthetic Goal 5C
+> preparation and provider-error redaction are indexed in [CHANGELOG.md](CHANGELOG.md)
+> and the [portfolio milestone](docs/portfolio-milestone.md). The real Goal 5C study
+> remains deferred. No new effectiveness claim follows from the synthetic tests.
+
 This document summarises the results of an in-depth audit of the whole codebase
 (~6,700 lines of Python), the fixes implemented (v0.2.0), the qualitative extension of
 deep source analysis (v0.3.0, section 8), the search and output improvements (v0.4.0,
@@ -546,6 +553,14 @@ never empty a source entirely. The same mechanism is wired into web search and i
 ranking.
 
 ### 14.4 Measured result — the offline dataset
+
+> **Scope clarification (0.10.0).** The benchmark below evaluates the generic
+> scorer on fixed candidate pools using its shared defaults (3.0/3.0/2.8).
+> Historical wording about "production thresholds" must not be read as full
+> workflow replay: publication search uses 3.5, web search uses 5.0, and patent
+> search has separate tiers. Thus the earlier statement that no source uses 3.5
+> is incorrect. Historical numeric results remain unchanged; see the
+> [measurement contract](docs/goal5c-protocol.md#measurement-contracts-and-statistics).
 
 > **Correction (v0.9.5).** The table originally published here reported precision
 > 0.486 → 0.667 and F1 0.600 → 0.733, a +22 % F1 gain. Those numbers were measured

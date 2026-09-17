@@ -1,0 +1,11 @@
+# Only runtime build inputs enter the context; local credentials/data stay out.
+**
+!Dockerfile
+!requirements.txt
+!pyproject.toml
+!__init__.py
+!server.py
+!server_http.py
+!terminal_ui.py
+!tools/
+!tools/*.py

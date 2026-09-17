@@ -4,207 +4,157 @@
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 
-An MCP server for **source-grounded prior-art and novelty research**. Given a plain-language
-description of an invention, it searches patents, scientific publications and the web in one
-run, verifies what each source actually supports, and returns a report with an explicit
-evidence level for every finding.
+A **Python MCP backend for source-grounded prior-art research** across patents,
+scientific publications and the web. It records retrieval attempts and evidence
+in SQLite, applies deterministic relevance and evidence rules, and renders a
+report that distinguishes verified text, snippets and failed retrieval.
 
-Orchestrated through [Flowise](https://flowiseai.com/); the retrieval, grading and report
-generation happen entirely inside the MCP server.
+Built for my bachelor's thesis, **AI for Advanced Information Research**, then
+hardened through a technical audit, regression tests and reproducible evaluation
+work. The `v1.0-thesis` tag preserves the submitted prototype; **0.10.0** is the
+post-thesis portfolio milestone, not a production-readiness claim.
 
-*[Slovenská verzia README](README.sk.md)*
+[Example report](docs/example-report.md) · [Technical audit](AUDIT.md) ·
+[Release verification](docs/portfolio-milestone.md) · [Slovensky](README.sk.md)
 
----
+## What I built and improved
 
-## What it does
+- **Research backend:** seven MCP tools, asynchronous provider retrieval,
+  bounded retries, SQLite session state and source-grounded report generation.
+- **Deterministic hardening:** stable scoring/ranking tie-breaks, regression
+  tests and defect-restoration negative controls. Identical inputs/configuration
+  are the boundary; live provider responses are not deterministic.
+- **Passive decision capture:** candidate decisions and query/decomposition
+  provenance stored separately from production evidence. Capture failures do not
+  change retrieval or retry decisions. Provider errors omit credential-bearing
+  exception text.
+- **Offline evaluation infrastructure:** read-only snapshot import, explicit
+  identity reconciliation, blank blinded worksheets and deterministic original-query
+  roster rehearsal. These Goal 5C tools currently accept synthetic inputs only.
 
-Most research assistants return a list of links and let the model summarise them. This server
-does the opposite: it decides **what a source actually proves** before anything is written.
-
-- **Three source types in one workflow** — patents, publications and web, each with its own
-  providers and fallbacks.
-- **Explicit evidence levels** — a claim read from a patent document is not treated the same
-  as a search-result snippet (see the table below).
-- **Persistent session state** — every attempt, hit and verdict is stored in SQLite, so retries
-  and the final report work from recorded evidence rather than conversation history.
-- **Retry budgets with a checklist** — the workflow decides on its own whether the evidence is
-  good enough to finalise or whether a source needs another attempt.
-- **Multilingual input** — a non-English query is paired with an English search variant so
-  retrieval quality does not depend on the language the user typed in.
-- **Deterministic server side** — query understanding, relevance scoring and report rendering
-  use no LLM inside the MCP server. The language model only orchestrates tool calls.
-
-## How it works
+## Architecture
 
 ```mermaid
-flowchart TD
-    U([User query]) --> S[research_session_start]
-    S --> Q[research_session_understand_query]
-    Q --> P[patent_evidence_to_session]
-    Q --> B[publication_evidence_to_session]
-    Q --> W[web_evidence_to_session]
-    P --> C{research_session_checklist}
-    B --> C
-    W --> C
-    C -->|needs more evidence| P
-    C -->|can finalise| A[research_session_user_answer]
-    A --> R([Report with verdict,<br/>confidence and sources])
+flowchart LR
+    U[Information need] --> F[Flowise supervisor]
+    F --> M[Seven Python MCP tools]
+    M --> P[Patent / publication / web providers]
+    P --> E[Deterministic relevance and evidence processing]
+    E --> D[(SQLite sessions and evidence)]
+    D --> C[Retry checklist]
+    C --> F
+    D --> R[Rendered report]
+    E -. passive capture .-> V[(Candidate-decision traces)]
+    V -. synthetic offline preparation .-> O[Reviewed identities and blank worksheets]
 ```
 
-The supervisor in Flowise only calls tools and passes identifiers around — it never sees raw
-evidence. All retrieval, grading and rendering stay in the MCP server.
+The Flowise LLM orchestrates calls and supplies an English translation for
+non-English inputs. Retrieval, local scoring, evidence grading and rendering are
+Python code. The workflow instructs the supervisor to use compact acknowledgements
+and return the report verbatim, rather than rewriting raw evidence.
 
-### MCP tools
+The tools are `research_session_start`, `research_session_understand_query`,
+`patent_evidence_to_session`, `publication_evidence_to_session`,
+`web_evidence_to_session`, `research_session_checklist` and
+`research_session_user_answer`. Interface tests pin their names and parameters.
 
-| Tool | Purpose |
+## What is measured—and what is not
+
+| Evidence | Current scope |
 |---|---|
-| `research_session_start` | Creates or resumes a research session |
-| `research_session_understand_query` | Stores the query, its English variant and its requirement elements |
-| `patent_evidence_to_session` | Retrieves, grades and stores patent findings |
-| `publication_evidence_to_session` | Retrieves, grades and stores publication findings |
-| `web_evidence_to_session` | Retrieves, grades and stores web findings |
-| `research_session_checklist` | Decides between another retry and finalisation |
-| `research_session_user_answer` | Renders the final user-facing report |
+| Automated verification | 954 tests at the pre-release baseline; Python 3.11–3.13 CI, deterministic subprocess checks and negative controls. |
+| Historical relevance benchmark | **3 queries / 20 candidates**; fixed-pool generic-scorer regression benchmark. Query-macro precision **0.611**, recall **0.833**, F1 **0.683**. |
+| Goal 5C implementation | Synthetic/offline Phases 1–3 completed; import, reconciliation/blinding and roster-freeze contracts are tested. |
+| Real evaluation study | **Not performed.** No new participant acquisition, human labels, workflow metrics or prospective threshold confirmation. |
 
-### Evidence levels
+The benchmark uses shared generic scorer defaults, not a replay of all production
+search gates, fallbacks and retries. Its tiny, partly author-constructed dataset
+cannot establish general effectiveness, a meaningful improvement percentage or
+global retrieval recall. Tests are software checks, not independent study queries.
+See [AUDIT §14.4](AUDIT.md#144-measured-result--the-offline-dataset).
 
-Every finding carries the level of verification that was actually reached:
+This is research assistance, not a proof of novelty or patentability. Provider
+blocking, rate limits, lexical matching and incomplete documents limit results.
+`claim_verified` means claim text was obtained, not that legal anticipation was
+established. Failed retrieval is not evidence that prior art is absent.
 
-| Level | Meaning |
-|---|---|
-| `claim_verified` | Patent claims were read from the document itself |
-| `abstract_verified` | An abstract was retrieved and verified |
-| `verified_metadata` / `fetched_excerpt` | Metadata or page text was retrieved |
-| `search_snippet_only` | Only a search-result snippet — weak evidence |
-| `fetch_failed` / `fetch_timeout` | Retrieval failed; **not** evidence of absence |
+## Verify offline first
 
-## Requirements
+No API credentials, Docker, browser installation or LLM account are needed for
+these checks. Python **3.11–3.13** is the CI-tested range; dependency installation
+requires internet access. From a terminal:
 
-- Docker Desktop, installed and running
-- An OpenAI API key, set inside Flowise after importing the architecture
-- Optional API keys in `.env` for fuller retrieval
+```bash
+git clone https://github.com/RobackaB/novelty-research-mcp.git
+cd novelty-research-mcp
+python -m venv .venv
+```
 
-Recommended keys (all optional — the system degrades gracefully without them):
+Activate with `source .venv/bin/activate` on Linux/macOS, or
+`.venv\Scripts\Activate.ps1` in PowerShell. Then, **from the repository root**:
 
-| Variable | Used for |
-|---|---|
-| `GOOGLE_CSE_API_KEY`, `GOOGLE_CSE_ID` | Primary web search backend |
-| `TAVILY_API_KEY`, `EXA_API_KEY` | Web and patent search fallbacks |
-| `SEMANTIC_SCHOLAR_API_KEY` | Higher rate limits for publication search |
+```bash
+python -m pip install -e ".[dev]"
+python -m pytest -q
+python -m eval.relevance_eval
+python -m eval.goal5c --help
+```
 
-## Quick start
+`eval` and `eval.goal5c` are checkout tooling; they are not included in the server
+wheel or runtime Docker image. The Goal 5C commands require synthetic contract
+inputs: [snapshot import](docs/goal5c-offline-foundation.md),
+[reviewed preparation](docs/goal5c-synthetic-preparation.md), and
+[roster freeze](docs/goal5c-synthetic-freeze.md). Their tests provide executable
+fixtures; generated artifacts belong outside Git. `--sweep` on the historical
+evaluator explores trade-offs but does not authorize threshold changes.
+
+## Optional local Flowise demo
+
+Use Docker Desktop and the Compose-pinned Flowise version. Consult the
+[release smoke record](docs/portfolio-milestone.md#verification) for what was
+actually verified. An OpenAI credential is needed only for the live Flowise
+model; provider keys in [.env.example](.env.example) are optional and can enable
+additional retrieval paths. No key-free retrieval completeness is promised.
 
 ```bash
 cp .env.example .env
-```
-
-Fill in your keys in `.env`, then:
-
-```bash
+# PowerShell: Copy-Item .env.example .env
 docker compose up --build
 ```
 
-Once both containers are up:
+1. Open Flowise at `http://localhost:3000` and complete its local account setup if prompted.
+2. Create/open an **Agentflow V2**, then use its settings import action (Load Agents) for `flowise_architecture/Flowise_agent.json`.
+3. Set your own model credential and confirm access to the configured model.
+4. Set the Custom MCP node URL to `http://mcp-research-server:8000/mcp` when both
+   services run in Compose. The historical export uses `host.docker.internal`;
+   the service-name URL avoids routing through the host's published port.
+5. Describe an information need, for example: “A wireless sensor that monitors
+   battery temperature and sends overheating alerts.”
 
-- Flowise — `http://localhost:3000`
-- MCP server — `http://localhost:8000/mcp`
+This is a **trusted local demo**, not an authenticated public MCP service. Host/origin
+checks are not user authentication. Keep ports local, use non-sensitive inputs and
+do not expose it directly to the internet. Queries, evidence and some source URLs
+are persisted or logged.
 
-The MCP server prints its Flowise connection URL to the terminal on startup.
+Check `docker compose ps` and `docker compose logs` if startup or tools fail.
+`http://localhost:8000/mcp` is an MCP protocol endpoint, not a browser homepage.
+`docker compose down` stops the services and preserves their volumes;
+`docker compose down -v` also deletes Flowise state and research data.
 
-## Importing the Flowise architecture
+## Project map and stopping point
 
-1. Open Flowise at `http://localhost:3000`
-2. Import `flowise_architecture/Flowise_agent.json`
-3. Set your own OpenAI credential for the language model
-4. Check that the Custom MCP node points to `http://host.docker.internal:8000/mcp`
-   (this is how the Flowise container reaches the MCP server under Docker Desktop)
-
-## Example query
-
-Describe the solution — its purpose, technical elements, how it works and what it should
-achieve. English and Slovak inputs are both supported.
-
-```text
-Verify whether a system already exists for detecting anomalies in application logs that
-processes events in real time, uses machine learning to recognise unusual patterns,
-automatically creates an incident and notifies an administrator.
-```
-
-The workflow will call the tools in the order shown in the diagram above and return a report
-containing a verdict, a confidence level, the retrieval completeness, per-source quality and
-a list of the sources it actually used.
-
-**[See a full example report](docs/example-report.md)** produced by an actual run, including
-the element-by-element coverage table.
-
-## Troubleshooting
-
-If Flowise returns no answer or the workflow reports an error:
-
-- check that both containers are running — `docker compose ps`
-- check that the MCP server responds at `http://localhost:8000/mcp`
-- check that the Custom MCP node uses `http://host.docker.internal:8000/mcp`
-- check that `.env` contains your API keys
-- check that an OpenAI credential is set in Flowise
-
-Logs: `docker compose logs -f`
-
-## Data and shutdown
-
-Flowise state lives in the `flowise_data` Docker volume; the research SQLite database lives in
-`mcp_research_data` at `/app/data/research_sessions.sqlite3`.
-
-```bash
-docker compose down
-```
-
-This keeps the data. To remove the volumes as well:
-
-```bash
-docker compose down -v
-```
-
-## Development
-
-The test suite needs no network access and no API keys:
-
-```bash
-pip install -e ".[dev]"
-python -m pytest
-```
-
-Relevance quality is measured against a small gold-standard dataset in `eval/`, scored
-with precision, recall, F1, P@k, MAP and MRR. Every query is evaluated at the threshold
-the server actually applies to its source type, and the harness is offline and
-deterministic, so results reproduce exactly:
-
-```bash
-python -m eval.relevance_eval
-python -m eval.relevance_eval --sweep    # precision/recall trade-off across thresholds
-```
-
-The dataset is currently **3 queries and 20 candidates**, which is enough to catch a
-broken scorer but far too small to support a claim that one scorer is better than
-another. `AUDIT.md` section 14.4 states the measured numbers, the recall trade-off and
-this limitation in full.
-
-## Repository contents
-
-| Path | Contents |
+| Path | Purpose |
 |---|---|
-| `server.py` | MCP tool registration |
-| `server_http.py` | HTTP entry point used by the Docker image |
-| `tools/` | Retrieval, storage, verification and grading implementation |
-| `flowise_architecture/` | The Flowise architecture to import |
-| `flowise_baselines/` | Simpler RAG architectures, used only for comparison |
-| `terminal_ui.py` | Startup banner for the HTTP server |
-| `tests/` | Test suite, no network access required |
-| `eval/` | Relevance evaluation harness and gold-standard dataset |
-| `AUDIT.md` | Measured findings behind each change |
+| `server.py`, `server_http.py` | stdio / Streamable HTTP MCP entry points |
+| `tools/` | Retrieval, scoring, evidence, SQLite and passive capture |
+| `tests/` | Offline regression, contract and negative-control tests |
+| `eval/` | Historical benchmark and synthetic Goal 5C tooling |
+| `flowise_architecture/` | Current supervisor workflow export |
+| `flowise_baselines/` | Historical comparison workflows |
+| `docs/`, `AUDIT.md`, `CHANGELOG.md` | Protocols, example, findings and release history |
 
-## About this repository
-
-This project started as my bachelor's thesis. The `v1.0-thesis` tag marks the code exactly as
-it was submitted, with no later edits. Everything after that tag is incremental improvement —
-bug fixes, a test suite and measurable output-quality work — so the development remains
-traceable from the original submission.
+Major feature development pauses at this portfolio milestone. Goal 5C Phase 4
+has not started. The real pilot, 25–30 genuine queries, human labelling/adjudication,
+workflow-observed metrics and prospective threshold confirmation remain
+[future research](docs/goal5c-protocol.md), subject to its operational/privacy gates.
+The completed synthetic phases do not complete that empirical study.
