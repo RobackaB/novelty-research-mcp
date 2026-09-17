@@ -14,6 +14,15 @@ from bs4 import BeautifulSoup
 
 from ._ttl_cache import TTLCache
 from .chromium_scraper import PlaywrightTimeoutError, fetch_page_html_and_text
+from .jina_reader import fetch_via_jina
+from .patent_identity import (
+    extract_abstract_section,
+    extract_claims_section,
+    evidence_level_for_content,
+    promote_evidence_level,
+    recognised_claims_section,
+    resolve_identity,
+)
 from .output_cleaner import USER_AGENT, clean_output, first_match, format_error, soup_text, trim_words
 from .pdf_fetch import pdf_fetch_text
 from .requirement_match import unique_coverage_tokens
@@ -346,6 +355,115 @@ def _extract_fields(url: str, html: str, rendered_text: str, provider: str, atte
     return _with_fetch_diagnostics("\n".join(lines), provider, attempt_log)
 
 
+def _patent_number_from_url(url: str) -> str:
+    """Extract the publication number from a canonical patent URL.
+
+    The canonical URL is the one identity the fetch layer always has, whichever
+    provider discovered the candidate.
+    """
+    match = re.search(r"/patent/([A-Za-z]{2}[A-Za-z0-9]+)", str(url or ""))
+    return match.group(1).upper() if match else ""
+
+
+def _evidence_level_of(fetch_output: str) -> str:
+    """Read the EVIDENCE_LEVEL marker back out of a fetch result."""
+    match = re.search(r"^EVIDENCE_LEVEL:\s*(\S+)", fetch_output or "", re.MULTILINE)
+    return match.group(1).strip().lower() if match else ""
+
+
+def _reader_result(
+    url: str,
+    patent_number: str,
+    level: str,
+    content: str,
+    claim_text: str,
+    abstract_text: str,
+    attempt_log: list[dict[str, object]],
+) -> str:
+    """Build a fetch result from Reader content, retaining auditable evidence.
+
+    A claim_verified or abstract_verified result must carry the actual text it
+    was promoted on, not only COVERAGE_TOKENS -- otherwise the level cannot be
+    audited. Nothing is fabricated: the fields hold the recognised section
+    verbatim, and the standard not-found sentinels are used when a section was
+    not recognised.
+    """
+    claim_line = (
+        f"CLAIM1: {trim_words(claim_text, 220)}"
+        if claim_text
+        else "CLAIM1: No first claim was extracted from the page."
+    )
+    abstract_line = (
+        f"ABSTRACT: {trim_words(abstract_text, 160)}"
+        if abstract_text
+        else "ABSTRACT: No abstract was extracted from the page."
+    )
+    lines = [
+        f"PATENT_NUMBER: {patent_number or 'Unknown'} was identified from the page.",
+        "FILED: Unknown was identified on the page.",
+        "ASSIGNEE: Unknown was identified on the page.",
+        claim_line,
+        abstract_line,
+        "STATUS: OK was returned for this extraction.",
+        f"EVIDENCE_LEVEL: {level.upper()}",
+        f"CONTENT: {trim_words(content, 400)}",
+        f"COVERAGE_TOKENS: {' '.join(sorted(set(content.split()))[:2500])}",
+    ]
+    return _with_fetch_diagnostics("\n".join(lines), "reader", attempt_log)
+
+
+_JINA_MIN_WORDS = 120
+
+
+async def _jina_patent_fetch(target_url: str, timeout_ms: int) -> str:
+    """Fetch a patent document through the Reader backend. Fail-open.
+
+    Reader is used as an alternate legitimate fetch backend, not as a means of
+    circumventing access controls. It reads PDFs as well as HTML, so it serves
+    as a second route to the official patent PDF when direct extraction fails.
+    The optional JINA_API_KEY only raises the rate limit; without it the call is
+    still attempted, and any failure falls through to the next source.
+    """
+    try:
+        timeout_s = max(3.0, min(float(timeout_ms) / 1000.0, 30.0))
+        return await fetch_via_jina(target_url, timeout_s=timeout_s)
+    except Exception:  # noqa: BLE001 - an alternate backend must never break the chain
+        return ""
+
+
+def _jina_evidence(content: str, url: str, pdf_url: str, patent_number: str) -> tuple[str, str]:
+    """Return (evidence_level, validated_content) for Reader output.
+
+    Rejects block pages and error pages before anything else, then requires
+    identity before promoting past a snippet. Substantive text alone reaches
+    fetched_excerpt; claim_verified and abstract_verified additionally require a
+    structurally recognised section, so Reader merely returning text -- or prose
+    containing the word "claims" -- cannot produce a strong level.
+    """
+    text = clean_output(content or "")
+    if not text or _is_bot_block_page(text):
+        return ("", "")
+    # Reader output is untrusted content from an alternate backend. A matching
+    # canonical or PDF URL proves only which document was REQUESTED -- a redirect,
+    # an interstitial or a different page would still satisfy it. Promoting
+    # retrieved content therefore requires the content itself to carry the
+    # requested publication number.
+    identity = resolve_identity(patent_number=patent_number, content=text)
+    if identity != "normalised_number_in_content":
+        return ("", "")
+    level = evidence_level_for_content(
+        content=text, identity=identity, min_words=_JINA_MIN_WORDS
+    )
+    if level == "search_snippet_only":
+        return ("", "")
+    return (level, text)
+
+
+def _jina_sections(content: str) -> tuple[str, str]:
+    """Extract the recognised claims and abstract text, for auditability."""
+    return (extract_claims_section(content), extract_abstract_section(content))
+
+
 async def patent_fetch(url: str, timeout_ms: int = 30000, pdf_url: str = "") -> str:
     """Fetch a patent document and extract its basic fields.
 
@@ -360,6 +478,13 @@ async def patent_fetch(url: str, timeout_ms: int = 30000, pdf_url: str = "") -> 
     attempt_log: list[dict[str, object]] = []
     last_error = ""
     was_blocked = False
+    # Strongest evidence obtained so far. A later, weaker fallback must never
+    # overwrite claim_verified or abstract_verified already achieved.
+    best_level = ""
+    best_content = ""
+    best_claim = ""
+    best_abstract = ""
+    patent_number = _patent_number_from_url(url)
     provider = PATENT_FETCH_PROVIDERS[0]
 
     if pdf_url:
@@ -380,6 +505,9 @@ async def patent_fetch(url: str, timeout_ms: int = 30000, pdf_url: str = "") -> 
                     "elapsed_ms": elapsed_ms,
                 }
             )
+            # Direct PDF is the strongest available route; nothing later can
+            # beat claim_verified, so returning here is safe and keeps the
+            # existing _pdf_fields output byte-identical.
             result = _pdf_fields(url, pdf_url, pdf_text, attempt_log)
             _PATENT_FETCH_CACHE.set(cache_key, result)
             return result
@@ -391,6 +519,25 @@ async def patent_fetch(url: str, timeout_ms: int = 30000, pdf_url: str = "") -> 
                 "elapsed_ms": elapsed_ms,
             }
         )
+        # The official PDF address is known but direct extraction failed. Reader
+        # handles PDFs, so it is a second legitimate route to the same document
+        # before falling back to the HTML page.
+        started = time.perf_counter()
+        jina_pdf = await _jina_patent_fetch(pdf_url, timeout_ms)
+        level, validated = _jina_evidence(jina_pdf, url, pdf_url, patent_number)
+        attempt_log.append(
+            {
+                "provider": "google_patents_pdf_jina",
+                "attempt": 1,
+                "status": "ok" if level else ("rejected" if jina_pdf else "empty"),
+                "evidence_level": level or "none",
+                "elapsed_ms": int((time.perf_counter() - started) * 1000),
+            }
+        )
+        if level:
+            best_level = promote_evidence_level(best_level, level)
+            best_content = validated
+            best_claim, best_abstract = _jina_sections(validated)
     for attempt in range(1, MAX_FETCH_ATTEMPTS + 1):
         started = time.perf_counter()
         try:
@@ -403,9 +550,22 @@ async def patent_fetch(url: str, timeout_ms: int = 30000, pdf_url: str = "") -> 
                     "elapsed_ms": int((time.perf_counter() - started) * 1000),
                 }
             )
-            result = _extract_fields(url, html, rendered_text, provider.name, attempt_log)
-            _PATENT_FETCH_CACHE.set(cache_key, result)
-            return result
+            html_result = _extract_fields(url, html, rendered_text, provider.name, attempt_log)
+            html_level = _evidence_level_of(html_result)
+            # All backends participate in the same strongest-evidence selection.
+            # Returning here unconditionally would discard stronger Reader
+            # evidence obtained earlier in the chain.
+            if promote_evidence_level(best_level, html_level) == html_level and html_level != best_level:
+                _PATENT_FETCH_CACHE.set(cache_key, html_result)
+                return html_result
+            if best_level:
+                result = _reader_result(
+                    url, patent_number, best_level, best_content, best_claim, best_abstract, attempt_log
+                )
+                _PATENT_FETCH_CACHE.set(cache_key, result)
+                return result
+            _PATENT_FETCH_CACHE.set(cache_key, html_result)
+            return html_result
         except PlaywrightTimeoutError:
             last_error = "timeout"
             attempt_log.append(
@@ -440,6 +600,32 @@ async def patent_fetch(url: str, timeout_ms: int = 30000, pdf_url: str = "") -> 
             )
         if attempt < MAX_FETCH_ATTEMPTS:
             await asyncio.sleep(min(0.25 * (2 ** (attempt - 1)), 2.0))
+
+    # The HTML page failed or was blocked. Reader is the last live backend
+    # before the archive/snippet fallbacks.
+    started = time.perf_counter()
+    jina_html = await _jina_patent_fetch(url, timeout_ms)
+    level, validated = _jina_evidence(jina_html, url, pdf_url, patent_number)
+    attempt_log.append(
+        {
+            "provider": "google_patents_html_jina",
+            "attempt": 1,
+            "status": "ok" if level else ("rejected" if jina_html else "empty"),
+            "evidence_level": level or "none",
+            "elapsed_ms": int((time.perf_counter() - started) * 1000),
+        }
+    )
+    if level and promote_evidence_level(best_level, level) == level and level != best_level:
+        best_level = level
+        best_content = validated
+        best_claim, best_abstract = _jina_sections(validated)
+
+    if best_level:
+        result = _reader_result(
+            url, patent_number, best_level, best_content, best_claim, best_abstract, attempt_log
+        )
+        _PATENT_FETCH_CACHE.set(cache_key, result)
+        return result
 
     if was_blocked:
         return _with_fetch_diagnostics(
