@@ -22,9 +22,30 @@ and Goal 5C implementation remain unchanged from the reviewed 0.9.8 baseline.
 
 ## Verification
 
-The release candidate is being checked from a separate Git clone and newly
-created Python 3.11 virtual environment. The final record below will distinguish
-completed checks from environment-blocked checks before the PR is opened.
+Release checks on Windows, 2026-09-17:
+
+| Check | Result |
+|---|---|
+| Working checkout, Python 3.14.6, `PYTHONHASHSEED=1` | 954 tests passed. |
+| Fresh clone, Python 3.11.15, new venv and editable dev install | Installation and `pip check` passed; initial suite found the clock-sensitive test described below. |
+| Relevance evaluation | Precision 0.611, recall 0.833, F1 0.683; unchanged. |
+| MCP stdio and Streamable HTTP on localhost | Both initialized and listed exactly the seven expected tools; no retrieval/model calls. |
+| Documentation/scope checks | Local link targets resolve; historical changelog entries and example report body preserved; protected implementation files unchanged. |
+| Compose | `docker compose --env-file .env.example config --quiet` passed. |
+| Docker build/start and interactive Flowise import | Blocked by unavailable Docker Desktop Linux engine; not verified. |
+
+The initial fresh clone tested candidate `ad3beaa6cd0715c7466c1a359ce51c877297e681`.
+It exposed a pre-existing test assumption: zero-TTL set/get calls can read the same
+clock tick on Windows Python 3.11 (953 passed, one failed). The expiry test now
+advances a controlled clock and pins the existing strict-greater-than boundary;
+the cache implementation is unchanged. The original failure was reproduced with
+a same-tick clock, and disabling expiry makes the revised test fail. No test was
+skipped or weakened. The updated candidate is rechecked in the same isolated venv.
+
+The fresh environment
+resolved MCP SDK 1.30.0, pytest 9.1.1 and pytest-asyncio 1.4.0. No `.env` file,
+provider credentials or browser installation were needed. The MCP smoke used
+temporary storage and shut down its own server process.
 
 Reproduce the offline path from the repository root:
 

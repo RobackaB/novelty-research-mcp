@@ -63,8 +63,9 @@ pri blokovaní poskytovateľa alebo zlyhaní sťahovania neznamená neexistenciu
 
 ## Voliteľné lokálne demo
 
-Použite Docker Desktop a verziu Flowise pripnutú v Compose. Rozsah skutočne
-vykonaného overenia je uvedený v [zázname míľnika](docs/portfolio-milestone.md#verification).
+Použite Docker Desktop a Flowise **3.1.4** pripnutý v Compose. Spustenie kontajnerov
+a interaktívny import sa na overovacom počítači nepodarilo overiť; podrobnosti sú
+v [zázname míľnika](docs/portfolio-milestone.md#verification).
 Pre živé volania modelu nastavte vlastný OpenAI credential vo Flowise.
 Voliteľné kľúče poskytovateľov sú popísané v `.env.example`.
 

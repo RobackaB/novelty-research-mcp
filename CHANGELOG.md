@@ -30,6 +30,8 @@ compatible with the exported Flowise architecture.
   Google CSE leak is covered through real writer persistence with mocked requests.
 - Current documentation distinguishes the fixed-pool generic-scorer benchmark
   from production workflow performance and synthetic infrastructure from a real study.
+- The TTL expiry test uses a controlled clock, removing a Windows Python 3.11
+  same-tick failure without changing cache behavior.
 
 ### Verification and boundaries
 

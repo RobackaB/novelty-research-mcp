@@ -8,4 +8,5 @@
 !server_http.py
 !terminal_ui.py
 !tools/
+tools/**
 !tools/*.py

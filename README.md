@@ -110,9 +110,10 @@ evaluator explores trade-offs but does not authorize threshold changes.
 
 ## Optional local Flowise demo
 
-Use Docker Desktop and the Compose-pinned Flowise version. Consult the
-[release smoke record](docs/portfolio-milestone.md#verification) for what was
-actually verified. An OpenAI credential is needed only for the live Flowise
+Use Docker Desktop and the Compose-pinned Flowise **3.1.4**. Container startup
+and interactive import remain unverified on the release-check host; see the
+[release smoke record](docs/portfolio-milestone.md#verification).
+An OpenAI credential is needed only for the live Flowise
 model; provider keys in [.env.example](.env.example) are optional and can enable
 additional retrieval paths. No key-free retrieval completeness is promised.
 
