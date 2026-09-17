@@ -27,9 +27,11 @@ Release checks on Windows, 2026-09-17:
 | Check | Result |
 |---|---|
 | Working checkout, Python 3.14.6, `PYTHONHASHSEED=1` | 954 tests passed. |
-| Fresh clone, Python 3.11.15, new venv and editable dev install | Installation and `pip check` passed; initial suite found the clock-sensitive test described below. |
+| Fresh clone, Python 3.11.15, new venv and editable dev install | Installation and `pip check` passed; after the test-only correction below, 954 tests passed with `PYTHONHASHSEED=97`. |
 | Relevance evaluation | Precision 0.611, recall 0.833, F1 0.683; unchanged. |
 | MCP stdio and Streamable HTTP on localhost | Both initialized and listed exactly the seven expected tools; no retrieval/model calls. |
+| Goal 5C CLI | Top-level help and all five subcommand help paths passed; synthetic round trips and determinism/negative controls passed within the full suite. |
+| Focused cache/sorting tests | Six passed; expiry-disabled negative control failed as expected. |
 | Documentation/scope checks | Local link targets resolve; historical changelog entries and example report body preserved; protected implementation files unchanged. |
 | Compose | `docker compose --env-file .env.example config --quiet` passed. |
 | Docker build/start and interactive Flowise import | Blocked by unavailable Docker Desktop Linux engine; not verified. |
@@ -40,7 +42,9 @@ clock tick on Windows Python 3.11 (953 passed, one failed). The expiry test now
 advances a controlled clock and pins the existing strict-greater-than boundary;
 the cache implementation is unchanged. The original failure was reproduced with
 a same-tick clock, and disabling expiry makes the revised test fail. No test was
-skipped or weakened. The updated candidate is rechecked in the same isolated venv.
+skipped or weakened. Candidate `37b6ecc2d1fb8f0436fca638a609f6cf59508be3`
+passed all 954 tests in both environments (96.75 seconds on 3.14.6, 104.90 seconds
+on 3.11.15). Only this verification record changed afterward.
 
 The fresh environment
 resolved MCP SDK 1.30.0, pytest 9.1.1 and pytest-asyncio 1.4.0. No `.env` file,
