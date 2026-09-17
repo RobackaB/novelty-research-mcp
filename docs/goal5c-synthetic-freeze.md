@@ -123,6 +123,9 @@ are later obtained.
 
 ## CLI and verification boundary
 
+Run from the repository root in the development environment. Like the other
+evaluation tools, this CLI is not packaged in the server wheel or runtime image.
+
 ```powershell
 python -m eval.goal5c freeze-synthetic --registry C:\study-synthetic\registry.json --plan C:\study-synthetic\freeze-plan.json --output C:\study-synthetic\roster.json
 ```

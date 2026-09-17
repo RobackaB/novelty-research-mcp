@@ -8,6 +8,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Every release keeps the 7 MCP tool interfaces (names, parameters, response shape)
 compatible with the exported Flowise architecture.
 
+## [0.10.0] Portfolio engineering milestone
+
+### Added
+
+- Goal 5B passive candidate-decision capture, separate SQLite persistence and
+  structural query-envelope/original-query provenance. Recording and persistence
+  failures remain observable and fail-open; production evidence is unchanged.
+- Goal 5C synthetic/offline Phases 1–3: versioned contracts and read-only snapshot
+  import; explicit reversible identity reconciliation and blank blinded worksheets;
+  deterministic original-query roster rehearsal with disjoint pilots/discovery/reserves.
+- Regression and defect-restoration negative controls for capture equivalence,
+  provenance, scope isolation, exact evidence projection and sampling independence.
+- Credential-free checkout verification instructions, a runtime-only Docker build
+  context, a pinned Flowise image and loopback-only published demo ports.
+
+### Fixed
+
+- Provider diagnostics no longer serialize credential-bearing exception messages
+  into evidence. Exception type and HTTP status remain available; the confirmed
+  Google CSE leak is covered through real writer persistence with mocked requests.
+- Current documentation distinguishes the fixed-pool generic-scorer benchmark
+  from production workflow performance and synthetic infrastructure from a real study.
+- The TTL expiry test uses a controlled clock, removing a Windows Python 3.11
+  same-tick failure without changing cache behavior.
+
+### Verification and boundaries
+
+- Pre-release baseline: **954 tests**, including deterministic subprocess guards;
+  Python 3.11–3.13 CI. See the [milestone record](docs/portfolio-milestone.md) for
+  release-checkout and Docker/MCP/Flowise verification and any environment limits.
+- Historical query-macro precision **0.611**, recall **0.833**, F1 **0.683** remain
+  unchanged on **3 queries / 20 candidates**. This is a regression benchmark,
+  not proof of general effectiveness or global retrieval recall.
+- Builds on 0.9.8's deterministic ranking hardening; this milestone does not retune
+  thresholds or change scoring, ranking, provider selection, retries or MCP interfaces.
+- Real pilot execution, 25–30 genuine queries, human labelling/adjudication,
+  workflow-observed metrics and prospective threshold confirmation are deferred.
+  Goal 5C Phase 4 has not started; synthetic phases do not complete the empirical study.
+- `v1.0-thesis` remains the historical submitted prototype. The 0.10.0 tag and
+  GitHub Release are created only after external review, merge and green main CI.
+
 ## [0.9.8] Behavioural hardening: deterministic ordering and threshold naming
 
 ### Changed

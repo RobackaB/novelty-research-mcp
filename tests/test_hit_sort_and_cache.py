@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from tools._hit_sort import sort_hits_by_relevance
 from tools._ttl_cache import TTLCache
 
@@ -41,9 +43,14 @@ def test_ttl_cache_set_get():
     assert cache.get("missing") is None
 
 
-def test_ttl_cache_expiry():
-    cache: TTLCache[str, str] = TTLCache(ttl_seconds=0, max_entries=4)
+def test_ttl_cache_expiry(monkeypatch):
+    now = 100.0
+    monkeypatch.setattr("tools._ttl_cache.time", SimpleNamespace(time=lambda: now))
+    cache: TTLCache[str, str] = TTLCache(ttl_seconds=5, max_entries=4)
     cache.set("a", "1")
+    now = 105.0
+    assert cache.get("a") == "1"  # Existing boundary: elapsed time must exceed TTL.
+    now = 105.001
     assert cache.get("a") is None
 
 
