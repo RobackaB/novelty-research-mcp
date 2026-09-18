@@ -21,7 +21,8 @@ from ._provider_errors import provider_error_message
 from .output_cleaner import USER_AGENT, trim_words
 from .patent_filters import extract_patent_number
 from .patent_identity import normalise_publication_number
-from .decision_capture import _warn_capture_failure, capture_scope, safe_record
+from .patent_safety import redact_patent_text, sanitize_patent_value
+from .decision_capture import _warn_capture_failure, capture_scope, safe_record as _safe_record
 from .relevance import build_corpus_idf, discriminative_tokens, evidence_score, tokens
 from .result_contract import NormalizedResult
 
@@ -96,6 +97,19 @@ def _wipo_query(query: str) -> str:
         if word not in stopwords
     ]
     return " ".join(dict.fromkeys(words[:10])) or query
+
+
+def safe_record(collector: Any, **event: Any) -> None:
+    """Omit secret-bearing captures rather than misrepresent redacted scorer text."""
+    if collector is not None:
+        try:
+            if sanitize_patent_value(event) != event:
+                _warn_capture_failure(LOGGER, "Patent decision capture omitted a credential-bearing event", ValueError())
+                return
+        except Exception:
+            _warn_capture_failure(LOGGER, "Patent decision capture sanitization failed; event omitted", ValueError())
+            return
+    _safe_record(collector, **event)
 
 
 def _text(value: Any) -> str:
@@ -314,7 +328,7 @@ def _json_response(result: NormalizedResult, provider: str, candidates: list[Pat
             for candidate in candidates
         ],
     }
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+    return json.dumps(sanitize_patent_value(payload), ensure_ascii=False, indent=2)
 
 
 def _candidate(title: str, url: str, patent_number: str, snippet: str, provider: str) -> PatentCandidate | None:
@@ -455,7 +469,7 @@ async def enrich_candidate_by_number(
         response.raise_for_status()
         payload = response.json()
     except Exception:  # noqa: BLE001 - enrichment is best effort
-        LOGGER.info("patent enrichment failed for %s", candidate.patent_number)
+        LOGGER.info("patent enrichment failed for %s", redact_patent_text(candidate.patent_number))
         return candidate
 
     for cluster in ((payload.get("results") or {}).get("cluster")) or []:
@@ -756,8 +770,8 @@ async def patent_search(query: str, max_results: int = 10, *, _collector: Any = 
         payload={"cache_key": str(cache_key)},
     )
     if cached is not None:
-        LOGGER.info("patent_search cache_hit query=%r max_results=%s", normalized_query[:200], limit)
-        return cached
+        LOGGER.info("patent_search cache_hit query=%r max_results=%s", redact_patent_text(normalized_query[:200]), limit)
+        return redact_patent_text(cached)
     errors: list[dict[str, str]] = []
     notes: list[str] = []
     completed_count = 0
@@ -813,12 +827,12 @@ async def patent_search(query: str, max_results: int = 10, *, _collector: Any = 
                     candidate_origins[id(_candidate)] = (provider_name, variant)
                 all_candidates.extend(payload)
             elif status == "unavailable":
-                LOGGER.info("patent_search provider=%s skipped: %s", provider_name, payload)
+                LOGGER.info("patent_search provider=%s skipped: %s", provider_name, provider_error_message(payload))
             elif status == "error":
                 error_message = provider_error_message(payload)
                 LOGGER.info(
                     "patent_search provider=%s variant=%r failed: %s",
-                    provider_name, variant[:60], error_message,
+                    provider_name, redact_patent_text(variant[:60]), error_message,
                 )
                 errors.append({"provider": provider_name, "message": error_message})
 
@@ -833,18 +847,25 @@ async def patent_search(query: str, max_results: int = 10, *, _collector: Any = 
                     unavailable_primary_count += 1
                 notes.append(f"{provider_name} not configured for this run.")
 
-    deduped_candidates = _dedupe(all_candidates, _collector=_collector, _decision_query=normalized_query,
-        _origins=candidate_origins)
-    ranked, threshold_used = _rank(
-        normalized_query, deduped_candidates, limit, _collector=_collector,
-        _origins=candidate_origins,
-    )
-    # Enrich AFTER ranking and dedupe, BEFORE serialisation, so only candidates
-    # that survived relevance filtering and may actually be fetched are looked
-    # up. A candidate discovered by Tavily, Exa or WIPO has no pdf_url, and
-    # without this it can only be verified through the HTML page -- the one path
-    # that gets blocked. Fail-open: a failed lookup leaves the candidate as is.
-    ranked = await _enrich_ranked_candidates(client, ranked)
+        deduped_candidates = _dedupe(all_candidates, _collector=_collector, _decision_query=normalized_query,
+            _origins=candidate_origins)
+        ranked, threshold_used = _rank(
+            normalized_query, deduped_candidates, limit, _collector=_collector,
+            _origins=candidate_origins,
+        )
+        # Enrich after ranking and dedupe, while the shared HTTP client is still
+        # open. Only retained candidates are looked up; lookup failures leave
+        # the candidate and the search decisions unchanged.
+        ranked = await _enrich_ranked_candidates(client, ranked)
+        low_confidence_ranked: list[PatentCandidate] = []
+        if not ranked:
+            low_confidence_ranked, _ = _rank(
+                normalized_query, deduped_candidates, limit, allow_low_confidence=True,
+                _collector=_collector, _origins=candidate_origins,
+            )
+            # The existing low-confidence fallback also reaches detail fetch.
+            # Give these retained candidates the same PDF lookup opportunity.
+            low_confidence_ranked = await _enrich_ranked_candidates(client, low_confidence_ranked)
     threshold_note = (
         f"Patent rerank threshold used: {threshold_used:.2f}"
         + (
@@ -883,10 +904,6 @@ async def patent_search(query: str, max_results: int = 10, *, _collector: Any = 
         _PATENT_SEARCH_CACHE.set(cache_key, result)
         return result
 
-    low_confidence_ranked, _ = _rank(
-        normalized_query, deduped_candidates, limit, allow_low_confidence=True,
-        _collector=_collector, _origins=candidate_origins,
-    )
     if low_confidence_ranked:
         result = _json_response(
             NormalizedResult(

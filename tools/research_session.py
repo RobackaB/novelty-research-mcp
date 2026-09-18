@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ._provider_errors import provider_error_message
 from .decision_capture import CollectorContext, DecisionCollector, _warn_capture_failure
 from .evidence_quality import grade_source, hit_quality_score
 from .final_answer_pack import final_answer_pack
@@ -3320,9 +3321,9 @@ async def patent_evidence_to_session(
             # failure, and can never turn a successful retrieval into a failure.
             _persist_decision_events(_collector)
     except TimeoutError as exc:
-        return research_session_record_failure(session_id, "patent", clean_query, "timeout", "timeout", str(exc), int(begin["attempt"]), run_id, "patent_sqlite_writer_agent", english_query_clean)
+        return research_session_record_failure(session_id, "patent", clean_query, "timeout", "timeout", provider_error_message(exc), int(begin["attempt"]), run_id, "patent_sqlite_writer_agent", english_query_clean)
     except Exception as exc:
-        return research_session_record_failure(session_id, "patent", clean_query, "provider_error", exc.__class__.__name__, str(exc), int(begin["attempt"]), run_id, "patent_sqlite_writer_agent", english_query_clean)
+        return research_session_record_failure(session_id, "patent", clean_query, "provider_error", exc.__class__.__name__, provider_error_message(exc), int(begin["attempt"]), run_id, "patent_sqlite_writer_agent", english_query_clean)
     return research_session_save_evidence(
         session_id=session_id,
         source_type="patent",

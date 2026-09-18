@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 import tools.patent_fetch as pf
 
 BLOCK_HTML = (
@@ -18,6 +20,20 @@ REAL_HTML = (
     "a mobile application interface for remote control of the lock mechanism.</div></claim></section>"
     "</body></html>"
 )
+
+
+@pytest.fixture(autouse=True)
+def offline_alternatives(monkeypatch):
+    async def empty(*args, **kwargs):
+        return ""
+    async def empty_page(*args, **kwargs):
+        return "", ""
+    monkeypatch.setattr(pf, "fetch_via_jina", empty)
+    monkeypatch.setattr(pf, "_wayback_patent_fetch", empty_page)
+    monkeypatch.setattr(pf, "PATENT_FETCH_PROVIDERS", (
+        pf.PatentFetchProvider("google_patents", pf._google_patents_fetch),
+    ))
+    pf._PATENT_FETCH_CACHE.clear()
 
 
 def test_is_bot_block_page_detects_known_markers():
@@ -42,7 +58,7 @@ async def test_google_patents_fetch_raises_when_blocked_and_wayback_unavailable(
         await pf._google_patents_fetch("https://patents.google.com/patent/US10831585B2/en", 30000)
 
 
-async def test_google_patents_fetch_recovers_via_wayback(monkeypatch):
+async def test_patent_fetch_recovers_via_independent_wayback(monkeypatch):
     async def fake_fetch_page_html_and_text(url, timeout_ms=60000):
         return BLOCK_HTML, "blocked text"
 
@@ -52,11 +68,9 @@ async def test_google_patents_fetch_recovers_via_wayback(monkeypatch):
     monkeypatch.setattr(pf, "fetch_page_html_and_text", fake_fetch_page_html_and_text)
     monkeypatch.setattr(pf, "_wayback_patent_fetch", fake_wayback)
 
-    html, text = await pf._google_patents_fetch(
-        "https://patents.google.com/patent/US10831585B2/en", 30000
-    )
-    assert html == REAL_HTML
-    assert text == "real text"
+    result = await pf.patent_fetch("https://patents.google.com/patent/US10831585B2/en", 30000)
+    assert "EVIDENCE_LEVEL: CLAIM_VERIFIED" in result
+    assert "PROVIDER: wayback" in result
 
 
 async def test_google_patents_fetch_passthrough_when_not_blocked(monkeypatch):

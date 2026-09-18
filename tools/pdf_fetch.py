@@ -16,6 +16,7 @@ import re
 import httpx
 
 from .output_cleaner import USER_AGENT
+from ._provider_errors import provider_error_message
 
 LOGGER = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ def extract_pdf_text(data: bytes, max_pages: int = PDF_MAX_PAGES) -> str:
             return ""
         return combined
     except Exception as exc:
-        LOGGER.info("PDF text extraction failed: %s", exc)
+        LOGGER.info("PDF text extraction failed: %s", provider_error_message(exc))
         return ""
 
 
@@ -84,19 +85,19 @@ async def pdf_fetch_text(
                     return ""
                 content_length = response.headers.get("content-length")
                 if content_length and int(content_length) > max_bytes:
-                    LOGGER.info("PDF at %s exceeds size cap (%s bytes); skipping.", url, content_length)
+                    LOGGER.info("PDF exceeds size cap; skipping.")
                     return ""
                 content_type = response.headers.get("content-type", "").split(";")[0].lower()
                 buffer = bytearray()
                 async for chunk in response.aiter_bytes():
                     buffer.extend(chunk)
                     if len(buffer) > max_bytes:
-                        LOGGER.info("PDF at %s exceeded size cap while streaming; skipping.", url)
+                        LOGGER.info("PDF exceeded size cap while streaming; skipping.")
                         return ""
                 data = bytes(buffer)
         if not _looks_like_pdf(content_type, data):
             return ""
         return await asyncio.to_thread(extract_pdf_text, data, max_pages)
     except Exception as exc:
-        LOGGER.info("PDF fetch failed for %s: %s", url, exc)
+        LOGGER.info("PDF fetch failed: %s", provider_error_message(exc))
         return ""

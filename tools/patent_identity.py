@@ -87,21 +87,33 @@ def family_base_identity(value: str) -> str:
 normalise_publication_number = exact_publication_identity
 
 
-def content_contains_publication(content: str, patent_number: str) -> bool:
-    """Check whether the returned content carries the requested publication number.
+_PUBLICATION_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9])(?:US|EP|WO|GB|DE|FR|CA|AU|JP|CN|KR|RU|IN|TW|ES|IT|BR|MX|HK|SG|CH|AT|BE|NL|SE|FI|DK)"
+    r"[ \t-]*\d[\d,./]*(?:[ \t]+\d{3,})*[ \t-]*(?:[A-Z]\d{0,2})?(?![A-Za-z0-9])",
+    re.I,
+)
 
-    Matching is done on the normalised form of every number-shaped token in the
-    content, so a differently formatted rendering of the same publication still
-    matches. Fuzzy title similarity is deliberately not accepted anywhere: two
-    unrelated patents routinely share a title.
+
+def publication_in_header(content: str) -> str:
+    """Read the first publication identifier in document front matter.
+
+    A requested publication mentioned only in another patent's citations or in
+    Reader's URL envelope cannot establish document identity.
     """
+    text = str(content or "")
+    marker = re.search(r"(?im)^Markdown Content:\s*", text)
+    if marker:
+        text = text[marker.end():]
+    text = re.sub(r"(?im)^URL Source:.*$", "", text)
+    text = re.split(r"(?im)^\s*(?:references cited|patent citations|similar documents)\b", text)[0]
+    match = _PUBLICATION_TOKEN.search(text[:1600])
+    return exact_publication_identity(match.group()) if match else ""
+
+
+def content_contains_publication(content: str, patent_number: str) -> bool:
+    """Match publication identity in document front matter, including kind code."""
     target = exact_publication_identity(patent_number)
-    if not target:
-        return False
-    for token in re.findall(r"[A-Za-z]{2}[\s\-]?[\d,\s]{4,}[A-Za-z]?\d?", content or ""):
-        if exact_publication_identity(token) == target:
-            return True
-    return False
+    return bool(target and publication_in_header(content) == target)
 
 
 def resolve_identity(
@@ -139,53 +151,60 @@ def resolve_identity(
     return "none"
 
 
-# Structural claims openers. The bare word "claims" is deliberately absent: it
-# occurs in ordinary prose ("the applicant claims", "claims processing") and is
-# not evidence that a claims section was retrieved.
+# Plain-text headings retain their line structure, including Reader Markdown
+# and patent PDF INID labels. A numbered list by itself is not a claims section.
 _CLAIMS_SECTION_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
-    re.compile(r"\bwhat\s+is\s+claimed\s+is\b", re.I),
-    re.compile(r"\bwe\s+claim\b", re.I),
-    re.compile(r"\bi\s+claim\b", re.I),
-    re.compile(r"\bthe\s+invention\s+claimed\s+is\b", re.I),
-    re.compile(r"\bhaving\s+thus\s+described\s+the\s+invention[^.]{0,80}claim", re.I),
-    # A numbered claim opener on its own line, e.g. "1. A soil moisture sensor..."
-    re.compile(r"(?m)^\s*1\s*[.)]\s+(?:A|An|The)\s+\w", re.I),
-    re.compile(r"(?m)^\s*claims?\s*:?\s*$", re.I),
+    re.compile(r"\b(?:what\s+is\s+claimed(?:\s+is)?|we\s+claim|i\s+claim|the\s+invention\s+claimed\s+is)\s*:", re.I),
+    re.compile(r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?claims?[ \t]*(?:\(\d+\))?[ \t]*:?[ \t]*$"),
 )
-
 _ABSTRACT_SECTION_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
-    re.compile(r"(?m)^\s*abstract\s*:?\s*$", re.I),
-    re.compile(r"\babstract\s+of\s+the\s+disclosure\b", re.I),
-    re.compile(r"(?m)^\s*abstract\s*[:\-]\s*\S", re.I),
+    re.compile(r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:\(57\)[ \t]*)?abstract(?: of the disclosure)?[ \t]*:?[ \t]*(?:$|(?<=:))"),
 )
-
+_SECTION_END = re.compile(
+    r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:abstract|claims?(?:[ \t]*\(\d+\))?|description|"
+    r"background(?: of the invention)?|summary(?: of the invention)?|references cited|"
+    r"patent citations|similar documents|legal events|external links)[ \t]*:?[ \t]*$"
+)
 _MIN_CLAIM_WORDS: Final = 25
 _MIN_ABSTRACT_WORDS: Final = 20
 
 
-def recognised_claims_section(content: str) -> bool:
-    """Structurally recognise a claims section, not merely the word "claims".
-
-    Requires a claims opener AND enough following text to be claim-bearing, so
-    a passing mention such as "the patent claims priority" cannot promote a
-    document to claim_verified.
-    """
+def _section(content: str, patterns: tuple[re.Pattern[str], ...], minimum: int, *, claims: bool = False) -> str:
+    """Extract bounded section text; later unrelated sections cannot supply length."""
     text = content or ""
-    for pattern in _CLAIMS_SECTION_PATTERNS:
-        match = pattern.search(text)
-        if match and len(text[match.end():].split()) >= _MIN_CLAIM_WORDS:
-            return True
-    return False
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            tail = text[match.end():]
+            end = _SECTION_END.search(tail)
+            body = tail[:end.start()] if end else tail
+            if len(body.split()) < minimum:
+                continue
+            # A claims heading must lead to a numbered claim, not prose about
+            # claims or navigation. Explicit legal openers are also accepted.
+            if claims and not re.search(r"\bclaim(?:ed)?\s*(?:is)?\s*:", match.group(), re.I):
+                if not re.match(r"\s*1\s*[.)]\s+\S", body):
+                    continue
+            start = match.start() if claims else match.end()
+            return text[start:match.end() + len(body)].strip()
+    return ""
+
+
+def extract_claims_section(content: str) -> str:
+    """Retain the identified claims-bearing extraction without paraphrasing."""
+    return _section(content, _CLAIMS_SECTION_PATTERNS, _MIN_CLAIM_WORDS, claims=True)
+
+
+def extract_abstract_section(content: str) -> str:
+    """Retain an actual, bounded abstract section without consuming later text."""
+    return _section(content, _ABSTRACT_SECTION_PATTERNS, _MIN_ABSTRACT_WORDS)
+
+
+def recognised_claims_section(content: str) -> bool:
+    return bool(extract_claims_section(content))
 
 
 def recognised_abstract_section(content: str) -> bool:
-    """Structurally recognise an abstract section with substantive text after it."""
-    text = content or ""
-    for pattern in _ABSTRACT_SECTION_PATTERNS:
-        match = pattern.search(text)
-        if match and len(text[match.end():].split()) >= _MIN_ABSTRACT_WORDS:
-            return True
-    return False
+    return bool(extract_abstract_section(content))
 
 
 def promote_evidence_level(current: str, candidate: str) -> str:
@@ -223,31 +242,3 @@ def evidence_level_for_content(
     if recognised_abstract_section(text):
         return "abstract_verified"
     return "fetched_excerpt"
-
-def extract_claims_section(content: str) -> str:
-    """Return the recognised claims text verbatim, or "" if none is recognised.
-
-    Nothing is fabricated or paraphrased: the text returned is the slice of the
-    document that follows a structural claims opener. It exists so a
-    claim_verified result can be audited against the text it was promoted on.
-    """
-    text = content or ""
-    for pattern in _CLAIMS_SECTION_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            tail = text[match.start():].strip()
-            if len(tail.split()) >= _MIN_CLAIM_WORDS:
-                return tail
-    return ""
-
-
-def extract_abstract_section(content: str) -> str:
-    """Return the recognised abstract text verbatim, or "" if none is recognised."""
-    text = content or ""
-    for pattern in _ABSTRACT_SECTION_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            tail = text[match.end():].strip()
-            if len(tail.split()) >= _MIN_ABSTRACT_WORDS:
-                return tail
-    return ""
