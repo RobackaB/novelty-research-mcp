@@ -324,3 +324,67 @@ async def test_typed_claim_load_notice_does_not_stop_reader_upgrade(chain, notic
     assert pf._evidence_level_of(output) == "claim_verified"
     assert "What is claimed is" in output
     assert notice not in output
+
+
+_SECTION_LOAD_NOTICES = (
+    (
+        "Claims",
+        "1. Claims are currently unavailable. Please consult the official publication "
+        "for details. This service could not load the claim text at this time. "
+        "Reload this page or try again later.",
+    ),
+    (
+        "Abstract",
+        "The abstract of this patent could not be loaded at this time. Please "
+        "consult the official publication for details. Reload this page or try "
+        "again later to obtain the missing text.",
+    ),
+    (
+        "Claims",
+        "1. Claims are\ncurrently unavailable. Please consult the official publication "
+        "for details. This service could not load the claim text at this time. "
+        "Reload this page or try again later.",
+    ),
+    (
+        "Abstract",
+        "Abstract is\ncurrently unavailable. Please consult the official publication "
+        "for details. This service could not load the abstract text at this time. "
+        "Reload this page or try again later.",
+    ),
+)
+
+
+def _assert_load_notice_did_not_replace_archive(output, calls, backend, notice):
+    assert "archive" in calls, "a section-load notice prematurely stopped fallback"
+    provider = {
+        "pdf": "google_patents_pdf",
+        "reader_pdf": "google_patents_pdf_jina",
+        "reader_html": "google_patents_html_jina",
+    }[backend]
+    attempt = next(entry for entry in log(output) if entry["provider"] == provider)
+    assert attempt["evidence_level"] == "fetched_excerpt", "a load notice was promoted as a real section"
+    assert pf._evidence_level_of(output) == "abstract_verified"
+    assert "PROVIDER: wayback" in output
+    assert "ABSTRACT: An irrigation controller" in output
+    assert notice not in output
+
+
+@pytest.mark.parametrize("backend", ["pdf", "reader_pdf", "reader_html"])
+@pytest.mark.parametrize("heading,notice", _SECTION_LOAD_NOTICES, ids=["claims", "abstract", "wrapped-claims", "wrapped-abstract"])
+async def test_text_section_load_notice_does_not_replace_later_archive(chain, backend, heading, notice):
+    responses, calls = chain
+    # The exact header and genuine description satisfy identity and document
+    # length. Only the section-load guard can reject the claimed strong level.
+    responses[backend] = EXCERPT + f"\n{heading}\n{notice}"
+    responses["archive"] = html_document("abstract")
+    _assert_load_notice_did_not_replace_archive(await run(), calls, backend, notice)
+
+
+@pytest.mark.parametrize("heading,notice", _SECTION_LOAD_NOTICES, ids=["claims", "abstract", "wrapped-claims", "wrapped-abstract"])
+async def test_negative_control_text_load_notice_promotion_is_caught(chain, monkeypatch, heading, notice):
+    responses, calls = chain
+    responses["reader_html"] = EXCERPT + f"\n{heading}\n{notice}"
+    responses["archive"] = html_document("abstract")
+    monkeypatch.setattr(identity, "section_unavailable", lambda text, section: False)
+    with pytest.raises(AssertionError, match="prematurely stopped fallback|promoted as a real section"):
+        _assert_load_notice_did_not_replace_archive(await run(), calls, "reader_html", notice)

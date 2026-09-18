@@ -169,6 +169,19 @@ _MIN_CLAIM_WORDS: Final = 25
 _MIN_ABSTRACT_WORDS: Final = 20
 
 
+def section_unavailable(text: str, section: str) -> bool:
+    """Reject section-load notices in HTML, PDF and Reader text."""
+    # PDF and Reader can wrap a notice across lines; preserve the source text
+    # elsewhere and normalize whitespace only for this availability check.
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"^1\s*[.)]\s*", "", text)
+    return bool(re.match(
+        rf"(?:no (?:first )?{section}\b|(?:the )?{section}(?: of this patent)? "
+        r"(?:are|is|was|were|could)\b.{0,80}\b(?:unavailable|not available|not be loaded|not loaded|missing)\b)",
+        text, re.I,
+    ))
+
+
 def _section(content: str, patterns: tuple[re.Pattern[str], ...], minimum: int, *, claims: bool = False) -> str:
     """Extract bounded section text; later unrelated sections cannot supply length."""
     text = content or ""
@@ -178,6 +191,8 @@ def _section(content: str, patterns: tuple[re.Pattern[str], ...], minimum: int, 
             end = _SECTION_END.search(tail)
             body = tail[:end.start()] if end else tail
             if len(body.split()) < minimum:
+                continue
+            if section_unavailable(body, "claims?" if claims else "abstract"):
                 continue
             # A claims heading must lead to a numbered claim, not prose about
             # claims or navigation. Explicit legal openers are also accepted.

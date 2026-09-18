@@ -27,6 +27,7 @@ from .patent_identity import (
     content_contains_publication,
     exact_publication_identity,
     publication_in_header,
+    section_unavailable as _section_unavailable,
 )
 from .output_cleaner import USER_AGENT, first_match, soup_text, trim_words
 from .pdf_fetch import pdf_fetch_text
@@ -170,16 +171,6 @@ async def _patent_pdf_fetch(pdf_url: str, timeout_ms: int) -> str:
     """Download the official patent PDF and return the text extracted from it."""
     timeout_s = max(10.0, min(timeout_ms / 1000.0 * 2, 40.0))
     return await pdf_fetch_text(pdf_url, timeout_s=timeout_s, max_pages=30)
-
-
-def _section_unavailable(text: str, section: str) -> bool:
-    """Reject section-load notices, not claims about unavailable resources."""
-    text = re.sub(r"^\s*1\s*[.)]\s*", "", text).strip()
-    return bool(re.match(
-        rf"(?:no (?:first )?{section}\b|(?:the )?{section}(?: of this patent)? "
-        r"(?:are|is|was|were|could)\b.{0,80}\b(?:unavailable|not available|not be loaded|not loaded|missing)\b)",
-        text, re.I,
-    ))
 
 
 def _extract_first_claim_from_html(soup: BeautifulSoup) -> str:
