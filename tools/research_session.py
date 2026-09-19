@@ -592,13 +592,25 @@ _RETRY_SATURATION_RATIO = 0.8
 _RETRY_SATURATION_MIN_INSERTED = 1
 
 
-def _is_source_retry_saturated(latest_row: sqlite3.Row | None) -> bool:
-    """Determine whether the last retry returned mostly duplicate hits."""
+def _is_source_retry_saturated(
+    latest_row: sqlite3.Row | None,
+    *,
+    unchanged_evidence: bool = False,
+    usable_complete: bool = False,
+    unused_variants: list[str] | None = None,
+    uncovered: list[dict[str, Any]] | None = None,
+    envelope_available: bool = False,
+) -> bool:
+    """Require exhausted known gain paths, not merely repeated identities."""
+    if not envelope_available or not unchanged_evidence or not usable_complete:
+        return False
+    if unused_variants is None or uncovered is None or unused_variants or uncovered:
+        return False
     if not latest_row:
         return False
     try:
         attempt = int(latest_row["attempt"] or 0)
-    except (KeyError, IndexError, TypeError):
+    except (KeyError, IndexError, TypeError, ValueError):
         return False
     if attempt <= 1:
         return False
@@ -606,11 +618,69 @@ def _is_source_retry_saturated(latest_row: sqlite3.Row | None) -> bool:
     stats = normalized.get("__dedupe_stats") if isinstance(normalized, dict) else None
     if not isinstance(stats, dict):
         return False
-    inserted = int(stats.get("inserted_hits") or 0)
-    deduped = int(stats.get("deduped_hits") or 0)
+    inserted = _safe_int(stats.get("inserted_hits"), 0)
+    deduped = _safe_int(stats.get("deduped_hits"), 0)
     if inserted < _RETRY_SATURATION_MIN_INSERTED:
         return False
     return (deduped / max(inserted, 1)) >= _RETRY_SATURATION_RATIO
+
+
+def _retry_information_state(
+    history: list[sqlite3.Row], source_type: str, original_query: str,
+    envelope: dict[str, Any],
+) -> dict[str, Any]:
+    """Conservatively compare stored evidence; never infer gain from scores alone.
+
+    Exact hit equality deliberately includes verification, retrieved text and
+    provenance. Even an unclassified change prevents a saturation claim. This
+    may spend another attempt on metadata-only changes, but cannot hide upgrades.
+    """
+    variants = (envelope.get("query_variants") or {}).get(source_type)
+    planned = [original_query, *(variants if isinstance(variants, list) else [])]
+    used = {query_hash(str(row["query"] or "")) for row in history}
+    unused: list[str] = []
+    for variant in planned:
+        query = clean_tool_query(str(variant or ""))
+        identity = query_hash(query)
+        if query and identity not in used:
+            unused.append(query)
+            used.add(identity)
+    previous: dict[str, set[str]] = {}
+    latest_hits: list[Any] = []
+    normalized: dict[str, Any] = {}
+    unchanged = False
+    for index, row in enumerate(history):
+        payload = _safe_json_loads(row["normalized_json"], {})
+        normalized = payload if isinstance(payload, dict) else {}
+        hits = _as_list(normalized.get("hits"))
+        if index == len(history) - 1:
+            latest_hits = hits
+            unchanged = bool(hits) and all(
+                isinstance(hit, dict)
+                and json.dumps(hit, sort_keys=True, ensure_ascii=False)
+                in previous.get(_canonical_id(source_type, hit), set())
+                for hit in hits
+            )
+        else:
+            for hit in hits:
+                if isinstance(hit, dict):
+                    previous.setdefault(_canonical_id(source_type, hit), set()).add(
+                        json.dumps(hit, sort_keys=True, ensure_ascii=False)
+                    )
+    usable_complete = bool(history) and (
+        normalized.get("status") == "ok"
+        and normalized.get("completed") is True
+        and not normalized.get("errors")
+        and grade_source(normalized, source_type)["quality_grade"]
+        in {"strong", "medium", "reliable_no_results"}
+    )
+    return {
+        "unchanged_evidence": unchanged,
+        "usable_complete": usable_complete,
+        "unused_variants": unused,
+        "envelope_available": isinstance(variants, list),
+        "observed_gain": bool(latest_hits) and not unchanged,
+    }
 
 
 def _retrieval_status_notes(
@@ -2702,8 +2772,21 @@ def research_session_checklist(
         budget_exhausted = _budget_exceeded_sources(conn, clean_id, per_source_max)
         original_query = str(session["original_query"] or "")
         query_envelope = _safe_json_loads(session["query_envelope_json"], {}) or {}
+        history = conn.execute(
+            "SELECT * FROM evidence_results WHERE session_id=? ORDER BY attempt, id",
+            (clean_id,),
+        ).fetchall()
         conn.commit()
 
+    envelope = query_envelope if isinstance(query_envelope, dict) else {}
+    atomic = envelope.get("critical_requirements_atomic")
+    uncovered = _atoms_missing_full_coverage(latest, atomic) if isinstance(atomic, list) else []
+    retry_information = {
+        source: _retry_information_state(
+            [row for row in history if row["source_type"] == source],
+            source, original_query, envelope,
+        ) for source in SOURCE_TYPES
+    }
     source_checks: list[dict[str, Any]] = []
     actions: list[dict[str, Any]] = []
     for source_type in SOURCE_TYPES:
@@ -2726,7 +2809,15 @@ def research_session_checklist(
             check["latest_attempt"] = meta["latest_attempt"]
             check["warning_count"] = meta["warning_count"]
             check["error_count"] = meta["error_count"]
-        if _is_source_retry_saturated(latest.get(source_type)):
+        information = retry_information[source_type]
+        if _is_source_retry_saturated(
+            latest.get(source_type),
+            unchanged_evidence=information["unchanged_evidence"],
+            usable_complete=information["usable_complete"],
+            unused_variants=information["unused_variants"],
+            uncovered=uncovered,
+            envelope_available=information["envelope_available"] and isinstance(atomic, list),
+        ):
             check["retry_saturated"] = True
             check["needs_retry"] = False
             check["blocking"] = False
@@ -2772,59 +2863,90 @@ def research_session_checklist(
                 }
             )
 
-    if not actions:
-        atomic = (query_envelope or {}).get("critical_requirements_atomic") if isinstance(query_envelope, dict) else None
-        if isinstance(atomic, list) and atomic:
-            uncovered = _atoms_missing_full_coverage(latest, atomic)
-            if uncovered:
-                for check in source_checks:
-                    if check.get("blocking"):
-                        continue
-                    if check.get("retry_saturated"):
-                        continue
-                    source_type_str = str(check["source_type"])
-                    if int(check.get("attempt_count") or 0) >= per_source_max[source_type_str]:
-                        continue
-                    if check["quality_grade"] not in {"strong", "medium"}:
-                        continue
-                    source_index = SOURCE_TYPES.index(source_type_str) if source_type_str in SOURCE_TYPES else 0
-                    atom = uncovered[source_index % len(uncovered)]
-                    atom_label = str(atom.get("label") or "").strip() or original_query
-                    analysis_base = str(
-                        (query_envelope or {}).get("understanding_query") or ""
-                    ).strip() if isinstance(query_envelope, dict) else ""
-                    if not analysis_base:
-                        analysis_base = original_query
-                    atom_terms = [
-                        str(term).strip()
-                        for term in (atom.get("terms") or [])
-                        if str(term).strip()
-                    ]
-                    atom_search_text = " ".join(atom_terms) or atom_label
-                    if source_type_str == "web":
-                        core_subject = str((query_envelope or {}).get("core_subject") or "").strip() if isinstance(query_envelope, dict) else ""
-                        web_base = core_subject or analysis_base
-                        targeted_query = _compact_query_text(f"{web_base} {atom_search_text}", 12) or f"{web_base} {atom_search_text}".strip()
-                    else:
-                        targeted_query = f"{analysis_base} {atom_search_text}".strip()
-                    actions.append(
-                        {
-                            "source_type": source_type_str,
-                            "source_agent": SOURCE_AGENT_BY_TYPE[source_type_str],
-                            "direct_mcp_tool": SOURCE_TO_TOOL[source_type_str],
-                            "tool": SOURCE_TO_TOOL[source_type_str],
-                            "session_id": clean_id,
-                            "query": targeted_query,
-                            "attempt_no": int(check.get("attempt_count") or 0) + 1,
-                            "reason": (
-                                f"Source is {check['quality_grade']} but no single document covers atomic "
-                                f"requirement {atom.get('category')!r} ({atom_label!r}); running a targeted follow-up."
-                            ),
-                            "element_guided": True,
-                            "missing_atom": atom_label,
-                        }
-                    )
+    # Element follow-ups are decided per source, even while another source retries.
+    if uncovered:
+        for check in source_checks:
+            if any(action["source_type"] == check["source_type"] for action in actions):
+                continue
+            if check.get("retry_saturated"):
+                continue
+            source_type_str = str(check["source_type"])
+            if int(check.get("attempt_count") or 0) >= per_source_max[source_type_str]:
+                continue
+            if check["quality_grade"] not in {"strong", "medium"}:
+                continue
+            source_index = SOURCE_TYPES.index(source_type_str) if source_type_str in SOURCE_TYPES else 0
+            atom = uncovered[source_index % len(uncovered)]
+            atom_label = str(atom.get("label") or "").strip() or original_query
+            analysis_base = str(
+                (query_envelope or {}).get("understanding_query") or ""
+            ).strip() if isinstance(query_envelope, dict) else ""
+            if not analysis_base:
+                analysis_base = original_query
+            atom_terms = [
+                str(term).strip()
+                for term in (atom.get("terms") or [])
+                if str(term).strip()
+            ]
+            atom_search_text = " ".join(atom_terms) or atom_label
+            if source_type_str == "web":
+                core_subject = str((query_envelope or {}).get("core_subject") or "").strip() if isinstance(query_envelope, dict) else ""
+                web_base = core_subject or analysis_base
+                targeted_query = _compact_query_text(f"{web_base} {atom_search_text}", 12) or f"{web_base} {atom_search_text}".strip()
+            else:
+                targeted_query = f"{analysis_base} {atom_search_text}".strip()
+            actions.append(
+                {
+                    "source_type": source_type_str,
+                    "source_agent": SOURCE_AGENT_BY_TYPE[source_type_str],
+                    "direct_mcp_tool": SOURCE_TO_TOOL[source_type_str],
+                    "tool": SOURCE_TO_TOOL[source_type_str],
+                    "session_id": clean_id,
+                    "query": targeted_query,
+                    "attempt_no": int(check.get("attempt_count") or 0) + 1,
+                    "reason": (
+                        f"Source is {check['quality_grade']} but no single document covers atomic "
+                        f"requirement {atom.get('category')!r} ({atom_label!r}); running a targeted follow-up."
+                    ),
+                    "element_guided": True,
+                    "missing_atom": atom_label,
+                }
+            )
 
+    # A successful best attempt must not conceal gain or incompleteness in a
+    # later retry. Keep first-attempt readiness and best-attempt selection intact.
+    for check in source_checks:
+        source = str(check["source_type"])
+        information = retry_information[source]
+        count = int(check.get("attempt_count") or 0)
+        source_actions = [action for action in actions if action["source_type"] == source]
+        if count >= per_source_max[source] or check.get("retry_saturated"):
+            continue
+        if not source_actions and count >= 2 and (
+            information["unused_variants"] or information["observed_gain"]
+            or not information["usable_complete"]
+        ):
+            action = {
+                "source_type": source,
+                "source_agent": SOURCE_AGENT_BY_TYPE[source],
+                "direct_mcp_tool": SOURCE_TO_TOOL[source],
+                "tool": SOURCE_TO_TOOL[source],
+                "session_id": clean_id,
+                "query": _planned_query(original_query, source, count, envelope),
+                "attempt_no": count + 1,
+                "reason": "Information-gain paths remain: unused query, changed evidence or incomplete retrieval.",
+            }
+            actions.append(action)
+            source_actions.append(action)
+        for action in source_actions:
+            if not action.get("element_guided") and information["unused_variants"]:
+                action["query"] = information["unused_variants"][0]
+        if source_actions:
+            check["needs_retry"] = True
+            check["blocking"] = True
+            check["ready"] = False
+
+    blocking_checks = [check for check in source_checks if check.get("blocking")]
     needs_loop = bool(actions)
     complete = all_sources_present and not blocking_checks and not low_total_evidence
     can_finalize = all_sources_present and not blocking_checks and not needs_loop
