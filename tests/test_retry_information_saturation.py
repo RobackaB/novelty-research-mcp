@@ -205,3 +205,109 @@ def test_restored_ratio_defect_fails_regression_assertion(temp_db, monkeypatch, 
     # The same production-path assertion must FAIL with the historical defect.
     with pytest.raises(AssertionError, match="retry_saturated"):
         _assert_retry(session, "patent", case)
+
+
+# --- diagnostic timing is not information gain -------------------------------
+
+def _timing_scenario(*, before_log, after_log, after_changes=None):
+    """Two patent attempts with the same substantive hit, exhausted plan.
+
+    Variants exhausted, no uncovered atom, latest complete and usable, dedupe
+    ratio qualifying: everything except evidence equality already permits
+    saturation, so the outcome turns solely on how hits are compared.
+    """
+    session = json.loads(rs.research_session_start("sensor"))["session_id"]
+    envelope = {
+        "understanding_query": "sensor", "core_subject": "sensor",
+        "query_variants": {s: ["sensor"] for s in rs.SOURCE_TYPES},
+        "critical_requirements_atomic": [],
+    }
+    with rs._connect() as conn:
+        conn.execute("UPDATE research_sessions SET query_envelope_json=? WHERE session_id=?",
+                     (json.dumps(envelope), session))
+        conn.commit()
+    for other in rs.SOURCE_TYPES:
+        if other != "patent":
+            _save(session, other, 1, [])
+    _save(session, "patent", 1, [_hit("patent", attempt_log=before_log)])
+    _save(session, "patent", 2, [_hit("patent", attempt_log=after_log, **(after_changes or {}))])
+    return session
+
+
+_LOG_A = [{"provider": "google_patents", "attempt": 1, "status": "ok", "elapsed_ms": 800}]
+_LOG_B = [{"provider": "google_patents", "attempt": 1, "status": "ok", "elapsed_ms": 950}]
+
+
+def _patent_check(session):
+    checklist = json.loads(rs.research_session_checklist(session))
+    return next(c for c in checklist["source_checks"] if c["source_type"] == "patent")
+
+
+def test_attempt_log_timing_difference_does_not_block_saturation(temp_db):
+    """elapsed_ms 800 vs 950 is diagnostics, not new information."""
+    check = _patent_check(_timing_scenario(before_log=_LOG_A, after_log=_LOG_B))
+    assert check["retry_saturated"] is True, check
+    assert check["needs_retry"] is False
+    assert check["ready"] is True
+
+
+def test_identical_attempt_logs_also_saturate(temp_db):
+    """Control: the timing case must not be the only reason saturation works."""
+    check = _patent_check(_timing_scenario(before_log=_LOG_A, after_log=_LOG_A))
+    assert check["retry_saturated"] is True, check
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("evidence_level", "claim_verified"),
+        ("verified_url", False),
+        ("summary", "Temperature sensor with newly retrieved claim text"),
+        ("relevance", "adjacent"),
+        ("relevance_score", 9.0),
+    ],
+    ids=["evidence_level", "verified_url", "summary", "relevance", "relevance_score"],
+)
+def test_substantive_change_still_prevents_saturation_despite_timing(temp_db, field, value):
+    """Excluding attempt_log must not weaken any substantive comparison."""
+    check = _patent_check(
+        _timing_scenario(before_log=_LOG_A, after_log=_LOG_B, after_changes={field: value})
+    )
+    assert not check.get("retry_saturated"), check
+    assert check["needs_retry"] is True
+
+
+def test_excluded_keys_are_narrow():
+    """Only diagnostic-only keys may be excluded from the signature."""
+    assert rs._RETRY_SIGNATURE_EXCLUDED_KEYS == frozenset({"attempt_log", "attempt_log_json"})
+
+
+def test_signature_projects_rather_than_mutating_the_hit():
+    hit = _hit("patent", attempt_log=_LOG_A)
+    rs._retry_evidence_signature(hit)
+    assert hit["attempt_log"] == _LOG_A, "the stored hit must not be mutated"
+
+
+def test_signature_compares_unknown_substantive_keys_by_default():
+    """A new field is compared unless explicitly excluded."""
+    a = rs._retry_evidence_signature(_hit("patent", some_future_field="x"))
+    b = rs._retry_evidence_signature(_hit("patent", some_future_field="y"))
+    assert a != b
+
+
+def _raw_json_signature(hit):
+    """The historical comparison: full raw-hit JSON equality."""
+    return json.dumps(hit, sort_keys=True, ensure_ascii=False)
+
+
+def test_restored_raw_hit_equality_fails_the_timing_regression(temp_db, monkeypatch):
+    """Defect-restoration control for this blocker."""
+    session = _timing_scenario(before_log=_LOG_A, after_log=_LOG_B)
+    assert _patent_check(session)["retry_saturated"] is True
+
+    monkeypatch.setattr(rs, "_retry_evidence_signature", _raw_json_signature)
+    check = _patent_check(session)
+    assert not check.get("retry_saturated"), (
+        "raw-hit equality should have treated the timing difference as information gain"
+    )
+    assert check["needs_retry"] is True
