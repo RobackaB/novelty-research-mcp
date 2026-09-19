@@ -30,9 +30,9 @@ IdentityBasis = Literal[
 # Ordered strongest first. A basis earlier in this tuple outranks a later one.
 IDENTITY_BASIS_ORDER: Final[tuple[IdentityBasis, ...]] = (
     "structured_lookup",
+    "normalised_number_in_content",
     "official_pdf_url",
     "canonical_url",
-    "normalised_number_in_content",
 )
 
 # Evidence levels this module may assign, weakest first. Used only to enforce
@@ -126,16 +126,17 @@ def resolve_identity(
 ) -> IdentityBasis:
     """Return the strongest identity basis available, or "none".
 
-    Ordered exactly as the review requires: a structured lookup tied to the
-    requested publication is strongest, then an official document URL obtained
-    for it, then the canonical URL, then the normalised number appearing in the
-    returned content.
+    Exact structured identity and exact retrieved-content identity outrank URL
+    locators. Family/base URL matches describe request provenance only and
+    cannot support strong evidence promotion.
     """
     target = exact_publication_identity(patent_number)
     if not target:
         return "none"
     if exact_publication_identity(structured_lookup_number) == target:
         return "structured_lookup"
+    if content_contains_publication(content, patent_number):
+        return "normalised_number_in_content"
     # URL-derived bases are matched on the kind-code-insensitive base, because
     # patentimages filenames frequently omit the kind code (".../US10762444.pdf"
     # for US10762444B2). These bases assert only which document was REQUESTED --
@@ -146,8 +147,6 @@ def resolve_identity(
         return "official_pdf_url"
     if canonical_url and base and base in family_base_identity(canonical_url):
         return "canonical_url"
-    if content_contains_publication(content, patent_number):
-        return "normalised_number_in_content"
     return "none"
 
 
@@ -252,6 +251,8 @@ def evidence_level_for_content(
     text = content or ""
     if identity == "none" or len(text.split()) < min_words:
         return "search_snippet_only"
+    if identity not in {"structured_lookup", "normalised_number_in_content"}:
+        return "fetched_excerpt"
     if recognised_claims_section(text):
         return "claim_verified"
     if recognised_abstract_section(text):

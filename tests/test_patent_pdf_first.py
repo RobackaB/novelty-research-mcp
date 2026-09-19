@@ -72,12 +72,12 @@ def test_pdf_fields_retain_extracted_section_without_fabricated_abstract():
 async def test_patent_fetch_prefers_pdf_and_skips_html(monkeypatch):
     html_called = False
 
-    async def fake_html(url, timeout_ms=60000):
+    async def fake_html(url, timeout_ms=60000, **kwargs):
         nonlocal html_called
         html_called = True
         return "<html></html>", ""
 
-    async def fake_pdf(url, timeout_s=20.0, max_pages=25, max_bytes=15 * 1024 * 1024):
+    async def fake_pdf(url, timeout_s=20.0, max_pages=25, max_bytes=15 * 1024 * 1024, **kwargs):
         return PDF_TEXT_WITH_CLAIMS
 
     monkeypatch.setattr(pf, "fetch_page_html_and_text", fake_html)
@@ -94,7 +94,7 @@ async def test_patent_fetch_prefers_pdf_and_skips_html(monkeypatch):
 
 
 async def test_patent_fetch_falls_back_to_html_when_pdf_empty(monkeypatch):
-    async def fake_html(url, timeout_ms=60000):
+    async def fake_html(url, timeout_ms=60000, **kwargs):
         return (
             "<html><head><title>US1</title></head><body>"
             "<section itemprop='claims'><claim><div class='claim-text'>1. A system comprising "
@@ -109,7 +109,7 @@ async def test_patent_fetch_falls_back_to_html_when_pdf_empty(monkeypatch):
     monkeypatch.setattr(pf, "pdf_fetch_text", fake_pdf)
     pf._PATENT_FETCH_CACHE.clear()
 
-    out = await pf.patent_fetch("https://patents.google.com/patent/US1/en", timeout_ms=5000, pdf_url="https://x.pdf")
+    out = await pf.patent_fetch("https://patents.google.com/patent/US1/en", timeout_ms=5000, pdf_url="https://patentimages.storage.googleapis.com/x.pdf")
     assert "EVIDENCE_LEVEL: CLAIM_VERIFIED" in out
     assert "anomaly detector" in out
     log = json.loads(next(l for l in out.splitlines() if l.startswith("ATTEMPT_LOG_JSON")).split(": ", 1)[1])
@@ -118,7 +118,7 @@ async def test_patent_fetch_falls_back_to_html_when_pdf_empty(monkeypatch):
 
 
 async def test_patent_fetch_falls_back_to_html_when_pdf_raises(monkeypatch):
-    async def fake_html(url, timeout_ms=60000):
+    async def fake_html(url, timeout_ms=60000, **kwargs):
         return "<html><head><title>US2 - Y</title></head><body><p>text</p></body></html>", "rendered"
 
     async def fake_pdf(url, **kwargs):
@@ -128,7 +128,7 @@ async def test_patent_fetch_falls_back_to_html_when_pdf_raises(monkeypatch):
     monkeypatch.setattr(pf, "pdf_fetch_text", fake_pdf)
     pf._PATENT_FETCH_CACHE.clear()
 
-    out = await pf.patent_fetch("https://patents.google.com/patent/US2/en", timeout_ms=5000, pdf_url="https://x.pdf")
+    out = await pf.patent_fetch("https://patents.google.com/patent/US2/en", timeout_ms=5000, pdf_url="https://patentimages.storage.googleapis.com/x.pdf")
     log = json.loads(next(l for l in out.splitlines() if l.startswith("ATTEMPT_LOG_JSON")).split(": ", 1)[1])
     assert log[0]["status"] == "failed"
 
@@ -136,7 +136,7 @@ async def test_patent_fetch_falls_back_to_html_when_pdf_raises(monkeypatch):
 async def test_patent_fetch_rejects_too_short_pdf_text(monkeypatch):
     """Short text, a cover page for instance, does not count as the full document."""
 
-    async def fake_html(url, timeout_ms=60000):
+    async def fake_html(url, timeout_ms=60000, **kwargs):
         return "<html><head><title>US3</title></head><body><p>x</p></body></html>", ""
 
     async def fake_pdf(url, **kwargs):
@@ -146,7 +146,7 @@ async def test_patent_fetch_rejects_too_short_pdf_text(monkeypatch):
     monkeypatch.setattr(pf, "pdf_fetch_text", fake_pdf)
     pf._PATENT_FETCH_CACHE.clear()
 
-    out = await pf.patent_fetch("https://patents.google.com/patent/US3/en", timeout_ms=5000, pdf_url="https://x.pdf")
+    out = await pf.patent_fetch("https://patents.google.com/patent/US3/en", timeout_ms=5000, pdf_url="https://patentimages.storage.googleapis.com/x.pdf")
     assert "PDF_CLAIMS_SECTION" not in out
 
 
@@ -242,7 +242,7 @@ async def test_evidence_pack_passes_pdf_url_and_uses_coverage_tokens(monkeypatch
             }
         )
 
-    async def fake_fetch(url, timeout_ms=18000, pdf_url=""):
+    async def fake_fetch(url, timeout_ms=18000, pdf_url="", *, patent_number=""):
         seen_pdf_urls.append(pdf_url)
         return pf._pdf_fields(url, pdf_url, PDF_TEXT_WITH_CLAIMS, [])
 

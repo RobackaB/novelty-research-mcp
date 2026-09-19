@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import ipaddress
 import re
 from typing import Any
 from urllib.parse import parse_qsl, quote, quote_plus, unquote, urlsplit
@@ -15,11 +16,29 @@ _ASSIGNMENT = re.compile(
     r"[\"']?\s*[=:]\s*[\"']?)[^\s,;\"'}]+", re.I,
 )
 
+_PATENT_HOSTS = frozenset({
+    "patents.google.com", "patentimages.storage.googleapis.com",
+    "archive.org", "web.archive.org", "r.jina.ai", "www.gstatic.com",
+})
 
-def public_document_url(url: str) -> bool:
-    """Never send a credential-bearing target to a document reader or archive."""
+
+def _public_host(host: str) -> bool:
+    host = host.lower().rstrip(".")
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal", ".lan", ".home", ".test", ".invalid")):
+        return False
     try:
-        if re.search(r"\s", url):
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        # Reject single-label names, numeric shorthand and encoded authorities.
+        return bool(re.fullmatch(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}", host))
+    return address.is_global and not any((address.is_reserved, address.is_multicast,
+        address.is_loopback, address.is_link_local, address.is_unspecified, address.is_private))
+
+
+def _credential_free_url(url: str) -> bool:
+    """Credential redaction is separate from permission to fetch a URL."""
+    try:
+        if re.search(r"[\s\\]", url):
             return False
         decoded = url
         for _ in range(3):
@@ -39,6 +58,46 @@ def public_document_url(url: str) -> bool:
         return False
 
 
+def public_document_url(url: str) -> bool:
+    """Reject credentials and syntactically internal/reserved URL targets.
+
+    Network callers additionally use patent_document_url's exact host allowlist;
+    this generic predicate alone is not a DNS-rebinding defense.
+    """
+    if not _credential_free_url(url):
+        return False
+    try:
+        parsed = urlsplit(url)
+        if parsed.port not in {None, 80, 443} or not _public_host(parsed.hostname or ""):
+            return False
+        decoded = url
+        for _ in range(3):
+            decoded = unquote(decoded)
+        return all(_public_host(urlsplit("https://" + authority).hostname or "")
+                   for authority in re.findall(r"https?://([^/?#\s]+)", decoded, re.I))
+    except ValueError:
+        return False
+
+
+def patent_document_url(url: str) -> bool:
+    """Only existing patent document services may receive fetch traffic."""
+    if not public_document_url(url):
+        return False
+    decoded = url
+    for _ in range(3):
+        decoded = unquote(decoded)
+    return all(
+        (urlsplit("https://" + authority).hostname or "").lower().rstrip(".") in _PATENT_HOSTS
+        for authority in re.findall(r"https?://([^/?#\s]+)", decoded, re.I)
+    )
+
+
+async def guard_patent_request(request: Any) -> None:
+    """Check every HTTP request, including redirects, before transport I/O."""
+    if not patent_document_url(str(request.url)):
+        raise ValueError("Unsafe patent document target rejected.")
+
+
 def redact_patent_text(value: str) -> str:
     """Redact configured secrets and credential syntax before text/token storage."""
     text = str(value or "")
@@ -52,7 +111,7 @@ def redact_patent_text(value: str) -> str:
         text = text.replace(secret, "[REDACTED]")
     # Do not retain an authenticated URL even with just its password obscured.
     text = _URL.sub(
-        lambda match: match.group() if public_document_url(unquote(match.group())) else "[REDACTED_URL]",
+        lambda match: match.group() if _credential_free_url(unquote(match.group())) else "[REDACTED_URL]",
         text,
     )
     text = _AUTH.sub("[REDACTED_AUTH]", text)

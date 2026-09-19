@@ -105,7 +105,7 @@ def _mock_patent_io(monkeypatch):
     monkeypatch.setattr(patent_search, "_exa_patent_search", empty)
     monkeypatch.setattr(patent_search, "_wipo_patentscope_search", empty)
 
-    async def fake_fetch(url, timeout_ms=18000, pdf_url=""):
+    async def fake_fetch(url, timeout_ms=18000, pdf_url="", *, patent_number=""):
         return (
             "PATENT_NUMBER: US1111111B2 was identified from the page.\n"
             "CLAIM1: 1. A smart door lock comprising a mobile application and access codes.\n"

@@ -12,6 +12,7 @@ import asyncio
 import io
 import logging
 import re
+from typing import Awaitable, Callable
 
 import httpx
 
@@ -72,6 +73,7 @@ async def pdf_fetch_text(
     timeout_s: float = 20.0,
     max_pages: int = PDF_MAX_PAGES,
     max_bytes: int = PDF_MAX_BYTES,
+    *, request_guard: Callable[[httpx.Request], Awaitable[None]] | None = None,
 ) -> str:
     """Download a PDF document and return its text; return empty text on any error."""
     try:
@@ -79,6 +81,7 @@ async def pdf_fetch_text(
             headers={"User-Agent": USER_AGENT},
             follow_redirects=True,
             timeout=max(5.0, min(timeout_s, 40.0)),
+            event_hooks={"request": [request_guard]} if request_guard else None,
         ) as client:
             async with client.stream("GET", url) as response:
                 if response.status_code >= 400:

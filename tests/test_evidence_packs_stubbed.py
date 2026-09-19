@@ -39,7 +39,7 @@ async def test_patent_evidence_pack_stubbed(monkeypatch):
             }
         )
 
-    async def fake_fetch(url, timeout_ms=18000, pdf_url=""):
+    async def fake_fetch(url, timeout_ms=18000, pdf_url="", *, patent_number=""):
         return (
             "PATENT_NUMBER: US1234567B2 was identified from the page.\n"
             "FILED: 2020-01-01 was identified on the page.\n"

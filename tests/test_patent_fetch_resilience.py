@@ -43,7 +43,7 @@ def test_is_bot_block_page_detects_known_markers():
 
 
 async def test_google_patents_fetch_raises_when_blocked_and_wayback_unavailable(monkeypatch):
-    async def fake_fetch_page_html_and_text(url, timeout_ms=60000):
+    async def fake_fetch_page_html_and_text(url, timeout_ms=60000, **kwargs):
         return BLOCK_HTML, "blocked text"
 
     async def fake_wayback(url, timeout_ms):
@@ -59,7 +59,7 @@ async def test_google_patents_fetch_raises_when_blocked_and_wayback_unavailable(
 
 
 async def test_patent_fetch_recovers_via_independent_wayback(monkeypatch):
-    async def fake_fetch_page_html_and_text(url, timeout_ms=60000):
+    async def fake_fetch_page_html_and_text(url, timeout_ms=60000, **kwargs):
         return BLOCK_HTML, "blocked text"
 
     async def fake_wayback(url, timeout_ms):
@@ -74,7 +74,7 @@ async def test_patent_fetch_recovers_via_independent_wayback(monkeypatch):
 
 
 async def test_google_patents_fetch_passthrough_when_not_blocked(monkeypatch):
-    async def fake_fetch_page_html_and_text(url, timeout_ms=60000):
+    async def fake_fetch_page_html_and_text(url, timeout_ms=60000, **kwargs):
         return REAL_HTML, "real text"
 
     monkeypatch.setattr(pf, "fetch_page_html_and_text", fake_fetch_page_html_and_text)
@@ -88,7 +88,7 @@ async def test_google_patents_fetch_respects_concurrency_semaphore(monkeypatch):
     active = 0
     peak = 0
 
-    async def fake_fetch_page_html_and_text(url, timeout_ms=60000):
+    async def fake_fetch_page_html_and_text(url, timeout_ms=60000, **kwargs):
         nonlocal active, peak
         active += 1
         peak = max(peak, active)
@@ -107,7 +107,7 @@ async def test_google_patents_fetch_respects_concurrency_semaphore(monkeypatch):
 
 
 async def test_patent_fetch_end_to_end_reports_blocked_status(monkeypatch):
-    async def fake_fetch_page_html_and_text(url, timeout_ms=60000):
+    async def fake_fetch_page_html_and_text(url, timeout_ms=60000, **kwargs):
         return BLOCK_HTML, "blocked text"
 
     async def fake_wayback(url, timeout_ms):
@@ -122,7 +122,7 @@ async def test_patent_fetch_end_to_end_reports_blocked_status(monkeypatch):
 
 
 async def test_patent_fetch_end_to_end_succeeds_when_not_blocked(monkeypatch):
-    async def fake_fetch_page_html_and_text(url, timeout_ms=60000):
+    async def fake_fetch_page_html_and_text(url, timeout_ms=60000, **kwargs):
         return REAL_HTML, "real text"
 
     monkeypatch.setattr(pf, "fetch_page_html_and_text", fake_fetch_page_html_and_text)

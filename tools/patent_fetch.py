@@ -14,7 +14,7 @@ from bs4 import BeautifulSoup
 
 from ._ttl_cache import TTLCache
 from ._provider_errors import provider_error_message
-from .patent_safety import public_document_url, redact_patent_text
+from .patent_safety import public_document_url, patent_document_url, guard_patent_request, redact_patent_text
 from .chromium_scraper import PlaywrightTimeoutError, fetch_page_html_and_text
 from .jina_reader import fetch_via_jina_preserving_structure as fetch_via_jina
 from .patent_identity import (
@@ -73,6 +73,7 @@ async def _static_patent_fetch(url: str, timeout_ms: int) -> tuple[str, str]:
         headers={"User-Agent": USER_AGENT},
         follow_redirects=True,
         timeout=timeout_s,
+        event_hooks={"request": [guard_patent_request]},
     ) as client:
         response = await client.get(url)
         response.raise_for_status()
@@ -90,17 +91,19 @@ async def _wayback_patent_fetch(url: str, timeout_ms: int) -> tuple[str, str]:
     """
     avail_timeout = max(3.0, min(8.0, timeout_ms / 3000))
     async with httpx.AsyncClient(
-        headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=avail_timeout
+        headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=avail_timeout,
+        event_hooks={"request": [guard_patent_request]},
     ) as client:
         response = await client.get("https://archive.org/wayback/available", params={"url": url})
         payload = response.json() if response.status_code < 400 else {}
     closest = ((payload or {}).get("archived_snapshots") or {}).get("closest") or {}
     snapshot_url = str(closest.get("url") or "").strip()
-    if not snapshot_url or not closest.get("available") or not public_document_url(snapshot_url):
+    if not snapshot_url or not closest.get("available") or not patent_document_url(snapshot_url):
         return "", ""
     fetch_timeout = max(5.0, min(15.0, timeout_ms / 1000))
     async with httpx.AsyncClient(
-        headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=fetch_timeout
+        headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=fetch_timeout,
+        event_hooks={"request": [guard_patent_request]},
     ) as client:
         response = await client.get(snapshot_url)
         if response.status_code >= 400:
@@ -125,7 +128,7 @@ async def _google_patents_fetch(url: str, timeout_ms: int) -> tuple[str, str]:
     """Render normally, without solving challenges or changing fingerprints."""
     async with _GOOGLE_PATENTS_SEMAPHORE:
         html, text = await fetch_page_html_and_text(
-            url, timeout_ms=max(5000, min(timeout_ms, 60000))
+            url, timeout_ms=max(5000, min(timeout_ms, 60000)), allowed_url=patent_document_url
         )
     if _is_bot_block_page(html) or _is_bot_block_page(text):
         raise BotBlockedError("Patent source returned a challenge page.")
@@ -170,7 +173,7 @@ def _pdf_fields(url: str, pdf_url: str, text: str, attempt_log: list[dict[str, o
 async def _patent_pdf_fetch(pdf_url: str, timeout_ms: int) -> str:
     """Download the official patent PDF and return the text extracted from it."""
     timeout_s = max(10.0, min(timeout_ms / 1000.0 * 2, 40.0))
-    return await pdf_fetch_text(pdf_url, timeout_s=timeout_s, max_pages=30)
+    return await pdf_fetch_text(pdf_url, timeout_s=timeout_s, max_pages=30, request_guard=guard_patent_request)
 
 
 def _extract_first_claim_from_html(soup: BeautifulSoup) -> str:
@@ -467,6 +470,13 @@ def patent_fetch_budget_seconds(timeout_ms: int, has_pdf: bool = True) -> float:
 
 
 async def patent_fetch(url: str, timeout_ms: int = 30000, pdf_url: str = "") -> str:
+    """Public MCP entry point; its signature remains unchanged."""
+    return await patent_fetch_for_candidate(url, timeout_ms, pdf_url)
+
+
+async def patent_fetch_for_candidate(
+    url: str, timeout_ms: int = 30000, pdf_url: str = "", *, patent_number: str = "",
+) -> str:
     """Try legitimate backends until claims are verified or all are exhausted.
 
     Every result must identify the exact publication. Evidence upgrades are
@@ -474,6 +484,12 @@ async def patent_fetch(url: str, timeout_ms: int = 30000, pdf_url: str = "") -> 
     """
     if not public_document_url(url):
         return "STATUS: FAILED\nEVIDENCE_LEVEL: FETCH_FAILED\nREASON: Non-public document URL rejected."
+    number = exact_publication_identity(patent_number or _patent_number_from_url(url))
+    if not re.fullmatch(r"[A-Z]{2}\d+(?:[A-Z]\d{0,2})?", number):
+        return "STATUS: FAILED\nEVIDENCE_LEVEL: FETCH_FAILED\nREASON: Exact publication identity unavailable."
+    # Discovery URLs remain in the evidence pack. They are not fetch targets:
+    # verification uses the retained publication identity and existing hosts.
+    url = f"https://patents.google.com/patent/{number}/en"
     cache_key = f"{url}|{max(5000, min(timeout_ms, 60000))}|{pdf_url}"
     cached = _PATENT_FETCH_CACHE.get(cache_key)
     if cached is not None:
@@ -481,7 +497,6 @@ async def patent_fetch(url: str, timeout_ms: int = 30000, pdf_url: str = "") -> 
     attempt_log: list[dict[str, object]] = []
     best_output, best_level, best_provider = "", "", ""
     last_error, was_blocked = "", False
-    number = _patent_number_from_url(url)
     seconds = _backend_timeout(timeout_ms)
 
     def consider(output: str, provider: str) -> None:
@@ -531,7 +546,7 @@ async def patent_fetch(url: str, timeout_ms: int = 30000, pdf_url: str = "") -> 
         elif raw:
             attempt_log[-1]["status"] = "rejected"
 
-    if pdf_url and public_document_url(pdf_url):
+    if pdf_url and patent_document_url(pdf_url):
         raw = await read_backend("google_patents_pdf", lambda: _patent_pdf_fetch(pdf_url, timeout_ms), max(10.0, min(seconds * 2, 40.0)))
         if raw:
             output = _pdf_fields(url, pdf_url, str(raw), [])

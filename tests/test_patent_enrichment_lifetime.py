@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import io
 
 import httpx
 import pytest
@@ -11,6 +12,7 @@ import pytest
 import tools.patent_search as ps
 import tools.patent_evidence_pack as pep
 import tools.research_session as rs
+import tools.patent_fetch as pf
 
 
 NUMBER = "US10762444B2"
@@ -32,11 +34,13 @@ def search_transport(monkeypatch):
     state = {
         "discovery": "tavily", "lookup_status": 200, "title": TITLE,
         "snippet": SNIPPET, "pdf_path": PDF_PATH,
-        "assignee": "Fixture Irrigation Company",
+        "assignee": "Fixture Irrigation Company", "url": URL,
     }
 
     def respond(request):
         requests.append(request)
+        if request.url.host == "patentimages.storage.googleapis.com":
+            return httpx.Response(200, content=state["pdf_bytes"], headers={"Content-Type": "application/pdf"})
         if request.url.host == "patents.google.com":
             if request.url.params.get("url") == f"q=({NUMBER})":
                 lookup_requests.append(request)
@@ -50,12 +54,12 @@ def search_transport(monkeypatch):
                 })
             return httpx.Response(200, json={"results": {"cluster": []}})
         if request.url.host == "api.tavily.com":
-            records = [{"title": state["title"], "url": URL, "content": state["snippet"]}]
+            records = [{"title": state["title"], "url": state["url"], "content": state["snippet"]}]
             return httpx.Response(200, json={
                 "results": records if state["discovery"] == "tavily" else [],
             })
         if request.url.host == "api.exa.ai":
-            records = [{"title": state["title"], "url": URL, "text": state["snippet"]}]
+            records = [{"title": state["title"], "url": state["url"], "text": state["snippet"]}]
             return httpx.Response(200, json={
                 "results": records if state["discovery"] == "exa" else [],
             })
@@ -81,8 +85,10 @@ def search_transport(monkeypatch):
     monkeypatch.setenv("EXA_API_KEY", "fixture-exa-key")
     monkeypatch.setattr(ps.httpx, "AsyncClient", client_factory)
     ps._PATENT_SEARCH_CACHE.clear()
+    pf._PATENT_FETCH_CACHE.clear()
     yield state, clients, requests, lookup_requests
     ps._PATENT_SEARCH_CACHE.clear()
+    pf._PATENT_FETCH_CACHE.clear()
 
 
 def _assert_enriched(payload):
@@ -255,3 +261,52 @@ async def test_negative_control_unsanitized_capture_would_store_secret(
         dump = "\n".join(conn.iterdump())
     with pytest.raises(AssertionError):
         assert secret not in dump
+
+
+@pytest.mark.parametrize("discovery", ["tavily", "exa"])
+@pytest.mark.parametrize("pdf_kind", ["B2", "A1"])
+async def test_non_google_discovery_reaches_real_enriched_pdf(monkeypatch, search_transport, discovery, pdf_kind):
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+    state, _, requests, lookups = search_transport
+    state.update(discovery=discovery, url="https://patentscope.wipo.int/search/en/detail.jsf?docId=12345",
+                 title=f"{TITLE} {NUMBER}")
+    document = (f"US10762444{pdf_kind} What is claimed is: 1. " +
+                "A soil moisture irrigation valve schedule controller transmits sensor measurements wirelessly and controls watering. " * 20)
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+    font = DictionaryObject({NameObject('/Type'): NameObject('/Font'), NameObject('/Subtype'): NameObject('/Type1'),
+                             NameObject('/BaseFont'): NameObject('/Helvetica')})
+    page[NameObject('/Resources')] = DictionaryObject({NameObject('/Font'): DictionaryObject({NameObject('/F1'): font})})
+    stream = DecodedStreamObject()
+    stream.set_data(f"BT /F1 12 Tf 72 720 Td ({document}) Tj ET".encode('ascii'))
+    page[NameObject('/Contents')] = writer._add_object(stream)
+    output = io.BytesIO()
+    writer.write(output)
+    state['pdf_bytes'] = output.getvalue()
+
+    async def empty_reader(*args, **kwargs):
+        return ""
+
+    async def empty_archive(*args, **kwargs):
+        return "", ""
+
+    monkeypatch.setattr(pf, 'PATENT_FETCH_PROVIDERS', ())
+    monkeypatch.setattr(pf, 'fetch_via_jina', empty_reader)
+    monkeypatch.setattr(pf, '_wayback_patent_fetch', empty_archive)
+    # Real search, number enrichment, pack, internal fetch, HTTP PDF stream and
+    # pypdf extraction. Only external HTTP responses/fallbacks are replaced.
+    payload = json.loads(await pep.patent_evidence_pack(QUERY, max_results=5))
+    hit = payload['hits'][0]
+    assert hit['url'] == state['url']
+    assert hit['patent_number'] == NUMBER
+    assert len(lookups) == 1
+    assert any(request.url.host == 'patentimages.storage.googleapis.com' for request in requests)
+    if pdf_kind == 'B2':
+        assert hit['evidence_level'] == 'claim_verified'
+        assert 'Claim evidence:' in hit['summary']
+        assert 'sensor measurements' in hit['summary']
+    else:
+        assert hit['evidence_level'] == 'search_snippet_only'
+        assert 'Claim evidence:' not in hit['summary']

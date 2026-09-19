@@ -10,13 +10,13 @@ from typing import Any
 from ._hit_sort import sort_hits_by_relevance
 from ._provider_errors import provider_error_message
 from .output_cleaner import trim_words
-from .patent_fetch import patent_fetch, patent_fetch_budget_seconds
-from .patent_safety import redact_patent_text, sanitize_patent_value
+from .patent_fetch import patent_fetch_for_candidate as patent_fetch, patent_fetch_budget_seconds
+from .patent_safety import redact_patent_text, sanitize_patent_value, patent_document_url
 from .patent_search import patent_search
 from .query_normalize import clean_tool_query
 from .relevance import discriminative_tokens, evidence_score, subject_anchors, tokens
 from .requirement_match import atom_coverage
-from .source_verify import verify_sources
+from .source_verify import verify_patent_sources as verify_sources
 
 
 _CLAIM_COVERAGE_FOCUSED_THRESHOLD = 0.5
@@ -278,12 +278,12 @@ async def patent_evidence_pack(
     if selected_for_fetch:
         per_fetch_ceiling = max(5000, min(fetch_timeout_ms, 18000))
 
-        async def _bounded_patent_fetch(url: str, pdf_url: str) -> str:
+        async def _bounded_patent_fetch(url: str, pdf_url: str, patent_number: str) -> str:
             """Fetch a patent's detail with an additional call timeout."""
             outer_ceiling_s = patent_fetch_budget_seconds(per_fetch_ceiling, bool(pdf_url))
             try:
                 return await asyncio.wait_for(
-                    patent_fetch(url=url, timeout_ms=per_fetch_ceiling, pdf_url=pdf_url),
+                    patent_fetch(url=url, timeout_ms=per_fetch_ceiling, pdf_url=pdf_url, patent_number=patent_number),
                     timeout=outer_ceiling_s,
                 )
             except asyncio.TimeoutError:
@@ -298,7 +298,8 @@ async def patent_evidence_pack(
         fetched = await asyncio.gather(
             *[
                 _bounded_patent_fetch(
-                    str(item.get("url") or ""), str(item.get("pdf_url") or "")
+                    str(item.get("url") or ""), str(item.get("pdf_url") or ""),
+                    str(item.get("patent_number") or ""),
                 )
                 for _, item in selected_for_fetch
             ],
@@ -312,7 +313,8 @@ async def patent_evidence_pack(
             else:
                 fetch_outputs[index] = redact_patent_text(str(result))
 
-    final_urls = [str(item.get("url") or "").strip() for item in candidates if item.get("url")]
+    final_urls = [str(item.get("url") or "").strip() for item in candidates
+                  if patent_document_url(str(item.get("url") or ""))]
     verification = ""
     if final_urls:
         try:

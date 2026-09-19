@@ -7,6 +7,7 @@ import logging
 import re
 import time
 from typing import Any
+from typing import Awaitable, Callable
 
 import httpx
 
@@ -50,6 +51,19 @@ def _url_text(urls: str | list[str] | tuple[str, ...] | Any) -> str:
 
 async def verify_sources(urls: str | list[str], max_urls: int = 20) -> str:
     """Verify whether the given URLs are reachable."""
+    return await _verify_sources(urls, max_urls)
+
+
+async def verify_patent_sources(urls: str | list[str], max_urls: int = 20) -> str:
+    """Patent-only URL verification with the same guarded redirect policy."""
+    from .patent_safety import guard_patent_request
+    return await _verify_sources(urls, max_urls, request_guard=guard_patent_request)
+
+
+async def _verify_sources(
+    urls: str | list[str], max_urls: int,
+    request_guard: Callable[[httpx.Request], Awaitable[None]] | None = None,
+) -> str:
     started = time.perf_counter()
     try:
         url_text = _url_text(urls)
@@ -67,7 +81,8 @@ async def verify_sources(urls: str | list[str], max_urls: int = 20) -> str:
             )
         capped = max(1, min(max_urls, 10))
         found = found[:capped]
-        async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=6.0) as client:
+        async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=6.0,
+                                    event_hooks={"request": [request_guard]} if request_guard else None) as client:
             lines = await asyncio.gather(*[_verify_one(client, url) for url in found])
         LOGGER.info("verify_sources elapsed_s=%.3f urls=%s", time.perf_counter() - started, len(found))
         return prepend_markers(
