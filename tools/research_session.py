@@ -625,6 +625,33 @@ def _is_source_retry_saturated(
     return (deduped / max(inserted, 1)) >= _RETRY_SATURATION_RATIO
 
 
+# Diagnostic-only keys excluded from the retry evidence signature. They record
+# how a fetch went, not what was found: attempt logs carry elapsed_ms, so two
+# substantively identical retries differ whenever timing differs. Treating that
+# as information gain would burn the whole attempt budget on unchanged evidence.
+# Deliberately narrow -- everything substantive (canonical identity,
+# evidence_level, verified_url, summary text, relevance and coverage fields,
+# provider provenance) is still compared exactly.
+_RETRY_SIGNATURE_EXCLUDED_KEYS: frozenset[str] = frozenset(
+    {"attempt_log", "attempt_log_json"}
+)
+
+
+def _retry_evidence_signature(hit: dict[str, Any]) -> str:
+    """Return a stable comparison key for a stored hit.
+
+    Projects the hit rather than mutating it, so the stored evidence is
+    untouched. Any key not explicitly excluded still participates, so a new
+    substantive field is compared by default rather than silently ignored.
+    """
+    projected = {
+        key: value
+        for key, value in hit.items()
+        if key not in _RETRY_SIGNATURE_EXCLUDED_KEYS
+    }
+    return json.dumps(projected, sort_keys=True, ensure_ascii=False)
+
+
 def _retry_information_state(
     history: list[sqlite3.Row], source_type: str, original_query: str,
     envelope: dict[str, Any],
@@ -657,7 +684,7 @@ def _retry_information_state(
             latest_hits = hits
             unchanged = bool(hits) and all(
                 isinstance(hit, dict)
-                and json.dumps(hit, sort_keys=True, ensure_ascii=False)
+                and _retry_evidence_signature(hit)
                 in previous.get(_canonical_id(source_type, hit), set())
                 for hit in hits
             )
@@ -665,7 +692,7 @@ def _retry_information_state(
             for hit in hits:
                 if isinstance(hit, dict):
                     previous.setdefault(_canonical_id(source_type, hit), set()).add(
-                        json.dumps(hit, sort_keys=True, ensure_ascii=False)
+                        _retry_evidence_signature(hit)
                     )
     usable_complete = bool(history) and (
         normalized.get("status") == "ok"
