@@ -232,6 +232,41 @@ def _completed(search_completed: bool, status: str) -> bool:
     return bool(search_completed and status == "ok")
 
 
+PATENT_VERIFICATION_CEILING = 6
+
+
+def select_candidates_for_verification(
+    candidates: list[dict[str, Any]], max_fetches: int
+) -> list[tuple[int, dict[str, Any]]]:
+    """Choose which patent candidates receive substantive verification.
+
+    Returns (original_index, candidate) pairs so fetch outputs still attach to
+    the right hit; discovery order is preserved and never reordered to fill the
+    budget.
+
+    The budget counts FETCHABLE candidates, not list positions. Slicing first and
+    filtering for a usable URL afterwards under-filled the budget whenever an
+    early candidate had no URL, silently verifying fewer patents than authorised.
+
+    The discovery score no longer narrows the pool. It is computed from title and
+    snippet only, so a low score reflects thin discovery evidence rather than
+    proof that deeper candidates are not worth verifying -- and the candidate
+    holding the strongest claims may sit below a weak-scoring first result.
+    Verification stays bounded by the caller's budget and a hard ceiling.
+    """
+    budget = max(0, min(int(max_fetches), PATENT_VERIFICATION_CEILING))
+    if budget == 0:
+        return []
+    selected: list[tuple[int, dict[str, Any]]] = []
+    for index, item in enumerate(candidates):
+        if not isinstance(item, dict) or not item.get("url"):
+            continue
+        selected.append((index, item))
+        if len(selected) >= budget:
+            break
+    return selected
+
+
 async def patent_evidence_pack(
     query: str,
     max_results: int = 10,
@@ -270,10 +305,7 @@ async def patent_evidence_pack(
         )
 
     candidates: list[dict[str, Any]] = list(search_payload.get("results") or [])
-    top_score = float(candidates[0].get("score") or 0.0) if candidates else 0.0
-    base_ceiling = 6 if top_score >= 5.0 else 3
-    fetch_limit = max(0, min(max_fetches, base_ceiling, len(candidates)))
-    selected_for_fetch = [(index, item) for index, item in enumerate(candidates[:fetch_limit]) if item.get("url")]
+    selected_for_fetch = select_candidates_for_verification(candidates, max_fetches)
     fetch_outputs: dict[int, str] = {}
     if selected_for_fetch:
         per_fetch_ceiling = max(5000, min(fetch_timeout_ms, 18000))
