@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 import tools.patent_evidence_pack as pep
 import tools.patent_fetch as pf
 from tools.patent_search import PATENT_PDF_BASE_URL, PatentCandidate, _google_patents_xhr_search
@@ -14,14 +16,27 @@ PDF_TEXT_WITH_CLAIMS = (
     "distributed systems comprising unsupervised online learning of event patterns and "
     "real time alert generation for an administrator. " + ("filler word " * 200)
 )
-PDF_TEXT_NO_CLAIMS = "Some patent front page text without any claim section marker. " + ("filler " * 250)
+PDF_TEXT_NO_CLAIMS = "United States Patent US10831585B2. Some patent front page text without any claim section marker. " + ("filler " * 250)
+
+
+@pytest.fixture(autouse=True)
+def offline_alternatives(monkeypatch):
+    async def empty(*args, **kwargs):
+        return ""
+    async def empty_page(*args, **kwargs):
+        return "", ""
+    monkeypatch.setattr(pf, "fetch_via_jina", empty)
+    monkeypatch.setattr(pf, "_wayback_patent_fetch", empty_page)
+    monkeypatch.setattr(pf, "PATENT_FETCH_PROVIDERS", (
+        pf.PatentFetchProvider("google_patents", pf._google_patents_fetch),
+    ))
+    pf._PATENT_FETCH_CACHE.clear()
 
 
 def test_pdf_claims_present_detection():
-    assert pf._pdf_claims_present("I claim : 1. A system") is True
-    assert pf._pdf_claims_present("What is claimed is: 1. A method") is True
-    assert pf._pdf_claims_present("The invention claimed is: 1.") is True
-    assert pf._pdf_claims_present("random front page text only") is False
+    assert pf._pdf_claims_present(PDF_TEXT_WITH_CLAIMS)
+    for text in ("I claim : 1. A system", "The invention claimed is: 1.", "claims priority", "random front page text only"):
+        assert not pf._pdf_claims_present(text)
 
 
 def test_pdf_fields_emit_coverage_tokens_and_claim_level():
@@ -40,33 +55,29 @@ def test_pdf_fields_emit_coverage_tokens_and_claim_level():
     assert "administrator" in coverage_line
 
 
-def test_pdf_fields_without_claims_is_abstract_level():
-    out = pf._pdf_fields("https://x/patent", "https://y.pdf", PDF_TEXT_NO_CLAIMS, [])
-    assert "EVIDENCE_LEVEL: ABSTRACT_VERIFIED" in out
+def test_pdf_fields_without_abstract_or_claims_is_excerpt_level():
+    out = pf._pdf_fields("https://patents.google.com/patent/US10831585B2/en", "https://y.pdf", PDF_TEXT_NO_CLAIMS, [])
+    assert "EVIDENCE_LEVEL: FETCHED_EXCERPT" in out
     assert "PDF_CLAIMS_SECTION: absent" in out
 
 
-def test_pdf_fields_use_sentinels_so_meta_text_never_pollutes_coverage():
-    """Meta sentences about the PDF must enter neither the coverage computation nor the summary."""
-    out = pf._pdf_fields("https://x/patent", "https://y.pdf", PDF_TEXT_WITH_CLAIMS, [])
-    claim_line = next(l for l in out.splitlines() if l.startswith("CLAIM1:"))
-    abstract_line = next(l for l in out.splitlines() if l.startswith("ABSTRACT:"))
-    # The existing filters in patent_evidence_pack exclude exactly these sentinels.
-    assert "No first claim" in claim_line
-    assert "No abstract section" in abstract_line
-    # And they genuinely do not reach the displayed summary.
-    assert pep._fetch_summary(out) == ""
+def test_pdf_fields_retain_extracted_section_without_fabricated_abstract():
+    out = pf._pdf_fields("https://patents.google.com/patent/US10831585B2/en", "https://y.pdf", PDF_TEXT_WITH_CLAIMS, [])
+    claim_line = next(line for line in out.splitlines() if line.startswith("CLAIM1:"))
+    assert "unsupervised online learning" in claim_line
+    assert "No abstract" not in pep._fetch_summary(out)
+    assert "unsupervised online learning" in pep._fetch_summary(out)
 
 
 async def test_patent_fetch_prefers_pdf_and_skips_html(monkeypatch):
     html_called = False
 
-    async def fake_html(url, timeout_ms=60000):
+    async def fake_html(url, timeout_ms=60000, **kwargs):
         nonlocal html_called
         html_called = True
         return "<html></html>", ""
 
-    async def fake_pdf(url, timeout_s=20.0, max_pages=25, max_bytes=15 * 1024 * 1024):
+    async def fake_pdf(url, timeout_s=20.0, max_pages=25, max_bytes=15 * 1024 * 1024, **kwargs):
         return PDF_TEXT_WITH_CLAIMS
 
     monkeypatch.setattr(pf, "fetch_page_html_and_text", fake_html)
@@ -83,9 +94,9 @@ async def test_patent_fetch_prefers_pdf_and_skips_html(monkeypatch):
 
 
 async def test_patent_fetch_falls_back_to_html_when_pdf_empty(monkeypatch):
-    async def fake_html(url, timeout_ms=60000):
+    async def fake_html(url, timeout_ms=60000, **kwargs):
         return (
-            "<html><head><title>US1 - X</title></head><body>"
+            "<html><head><title>US1</title></head><body>"
             "<section itemprop='claims'><claim><div class='claim-text'>1. A system comprising "
             "an anomaly detector and an administrator alert unit for logs.</div></claim></section>"
             "</body></html>"
@@ -98,7 +109,7 @@ async def test_patent_fetch_falls_back_to_html_when_pdf_empty(monkeypatch):
     monkeypatch.setattr(pf, "pdf_fetch_text", fake_pdf)
     pf._PATENT_FETCH_CACHE.clear()
 
-    out = await pf.patent_fetch("https://patents.google.com/patent/US1/en", timeout_ms=5000, pdf_url="https://x.pdf")
+    out = await pf.patent_fetch("https://patents.google.com/patent/US1/en", timeout_ms=5000, pdf_url="https://patentimages.storage.googleapis.com/x.pdf")
     assert "EVIDENCE_LEVEL: CLAIM_VERIFIED" in out
     assert "anomaly detector" in out
     log = json.loads(next(l for l in out.splitlines() if l.startswith("ATTEMPT_LOG_JSON")).split(": ", 1)[1])
@@ -107,7 +118,7 @@ async def test_patent_fetch_falls_back_to_html_when_pdf_empty(monkeypatch):
 
 
 async def test_patent_fetch_falls_back_to_html_when_pdf_raises(monkeypatch):
-    async def fake_html(url, timeout_ms=60000):
+    async def fake_html(url, timeout_ms=60000, **kwargs):
         return "<html><head><title>US2 - Y</title></head><body><p>text</p></body></html>", "rendered"
 
     async def fake_pdf(url, **kwargs):
@@ -117,7 +128,7 @@ async def test_patent_fetch_falls_back_to_html_when_pdf_raises(monkeypatch):
     monkeypatch.setattr(pf, "pdf_fetch_text", fake_pdf)
     pf._PATENT_FETCH_CACHE.clear()
 
-    out = await pf.patent_fetch("https://patents.google.com/patent/US2/en", timeout_ms=5000, pdf_url="https://x.pdf")
+    out = await pf.patent_fetch("https://patents.google.com/patent/US2/en", timeout_ms=5000, pdf_url="https://patentimages.storage.googleapis.com/x.pdf")
     log = json.loads(next(l for l in out.splitlines() if l.startswith("ATTEMPT_LOG_JSON")).split(": ", 1)[1])
     assert log[0]["status"] == "failed"
 
@@ -125,7 +136,7 @@ async def test_patent_fetch_falls_back_to_html_when_pdf_raises(monkeypatch):
 async def test_patent_fetch_rejects_too_short_pdf_text(monkeypatch):
     """Short text, a cover page for instance, does not count as the full document."""
 
-    async def fake_html(url, timeout_ms=60000):
+    async def fake_html(url, timeout_ms=60000, **kwargs):
         return "<html><head><title>US3</title></head><body><p>x</p></body></html>", ""
 
     async def fake_pdf(url, **kwargs):
@@ -135,7 +146,7 @@ async def test_patent_fetch_rejects_too_short_pdf_text(monkeypatch):
     monkeypatch.setattr(pf, "pdf_fetch_text", fake_pdf)
     pf._PATENT_FETCH_CACHE.clear()
 
-    out = await pf.patent_fetch("https://patents.google.com/patent/US3/en", timeout_ms=5000, pdf_url="https://x.pdf")
+    out = await pf.patent_fetch("https://patents.google.com/patent/US3/en", timeout_ms=5000, pdf_url="https://patentimages.storage.googleapis.com/x.pdf")
     assert "PDF_CLAIMS_SECTION" not in out
 
 
@@ -231,7 +242,7 @@ async def test_evidence_pack_passes_pdf_url_and_uses_coverage_tokens(monkeypatch
             }
         )
 
-    async def fake_fetch(url, timeout_ms=18000, pdf_url=""):
+    async def fake_fetch(url, timeout_ms=18000, pdf_url="", *, patent_number=""):
         seen_pdf_urls.append(pdf_url)
         return pf._pdf_fields(url, pdf_url, PDF_TEXT_WITH_CLAIMS, [])
 

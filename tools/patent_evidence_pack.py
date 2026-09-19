@@ -8,13 +8,15 @@ import re
 from typing import Any
 
 from ._hit_sort import sort_hits_by_relevance
+from ._provider_errors import provider_error_message
 from .output_cleaner import trim_words
-from .patent_fetch import patent_fetch
+from .patent_fetch import patent_fetch_for_candidate as patent_fetch, patent_fetch_budget_seconds
+from .patent_safety import redact_patent_text, sanitize_patent_value, patent_document_url
 from .patent_search import patent_search
 from .query_normalize import clean_tool_query
 from .relevance import discriminative_tokens, evidence_score, subject_anchors, tokens
 from .requirement_match import atom_coverage
-from .source_verify import verify_sources
+from .source_verify import verify_patent_sources as verify_sources
 
 
 _CLAIM_COVERAGE_FOCUSED_THRESHOLD = 0.5
@@ -145,6 +147,7 @@ def _fetch_level(fetch_output: str) -> str:
     return {
         "CLAIM_VERIFIED": "claim_verified",
         "ABSTRACT_VERIFIED": "abstract_verified",
+        "FETCHED_EXCERPT": "fetched_excerpt",
         "FETCH_TIMEOUT": "fetch_timeout",
         "FETCH_FAILED": "fetch_failed",
         "FETCH_BLOCKED": "fetch_failed",
@@ -156,10 +159,13 @@ def _fetch_summary(fetch_output: str) -> str:
     claim = _field(fetch_output, "CLAIM1")
     abstract = _field(fetch_output, "ABSTRACT")
     parts = []
-    if claim and "No claim excerpt" not in claim and "No first claim" not in claim:
+    if claim and not re.match(r"No (?:claim|first claim)\b", claim, re.I):
         parts.append(f"Claim evidence: {claim}")
-    if abstract and "No abstract excerpt" not in abstract and "No abstract section" not in abstract:
+    if abstract and not re.match(r"No abstract\b", abstract, re.I):
         parts.append(f"Abstract evidence: {abstract}")
+    content = _field(fetch_output, "CONTENT")
+    if content and not parts:
+        parts.append(f"Retrieved document evidence: {content}")
     return trim_words(" ".join(parts), 90)
 
 
@@ -247,7 +253,7 @@ async def patent_evidence_pack(
     search_query = relevance_query
     try:
         search_raw = await patent_search(query=search_query, max_results=max_results, **_capture_kwargs)
-        search_payload = json.loads(search_raw)
+        search_payload = sanitize_patent_value(json.loads(search_raw))
     except Exception as exc:
         return json.dumps(
             {
@@ -256,7 +262,7 @@ async def patent_evidence_pack(
                 "completed": False,
                 "reliable_no_results": False,
                 "hits": [],
-                "errors": [{"type": "patent_search_failed", "message": str(exc)}],
+                "errors": [{"type": "patent_search_failed", "message": provider_error_message(exc)}],
                 "warnings": warnings,
             },
             ensure_ascii=False,
@@ -267,17 +273,17 @@ async def patent_evidence_pack(
     top_score = float(candidates[0].get("score") or 0.0) if candidates else 0.0
     base_ceiling = 6 if top_score >= 5.0 else 3
     fetch_limit = max(0, min(max_fetches, base_ceiling, len(candidates)))
-    selected_for_fetch = [item for item in candidates[:fetch_limit] if item.get("url")]
-    fetch_outputs: list[str] = []
+    selected_for_fetch = [(index, item) for index, item in enumerate(candidates[:fetch_limit]) if item.get("url")]
+    fetch_outputs: dict[int, str] = {}
     if selected_for_fetch:
         per_fetch_ceiling = max(5000, min(fetch_timeout_ms, 18000))
-        outer_ceiling_s = max(6.0, (per_fetch_ceiling * 2) / 1000.0)
 
-        async def _bounded_patent_fetch(url: str, pdf_url: str) -> str:
+        async def _bounded_patent_fetch(url: str, pdf_url: str, patent_number: str) -> str:
             """Fetch a patent's detail with an additional call timeout."""
+            outer_ceiling_s = patent_fetch_budget_seconds(per_fetch_ceiling, bool(pdf_url))
             try:
                 return await asyncio.wait_for(
-                    patent_fetch(url=url, timeout_ms=per_fetch_ceiling, pdf_url=pdf_url),
+                    patent_fetch(url=url, timeout_ms=per_fetch_ceiling, pdf_url=pdf_url, patent_number=patent_number),
                     timeout=outer_ceiling_s,
                 )
             except asyncio.TimeoutError:
@@ -292,21 +298,23 @@ async def patent_evidence_pack(
         fetched = await asyncio.gather(
             *[
                 _bounded_patent_fetch(
-                    str(item.get("url") or ""), str(item.get("pdf_url") or "")
+                    str(item.get("url") or ""), str(item.get("pdf_url") or ""),
+                    str(item.get("patent_number") or ""),
                 )
-                for item in selected_for_fetch
+                for _, item in selected_for_fetch
             ],
             return_exceptions=True,
         )
-        for item, result in zip(selected_for_fetch, fetched):
+        for (index, item), result in zip(selected_for_fetch, fetched):
             if isinstance(result, Exception):
-                text = f"TOOL_ERROR: patent_fetch\nREASON: {result}\nSTATUS: FAILED\nEVIDENCE_LEVEL: FETCH_FAILED"
+                text = f"TOOL_ERROR: patent_fetch\nREASON: {provider_error_message(result)}\nSTATUS: FAILED\nEVIDENCE_LEVEL: FETCH_FAILED"
                 warnings.append(trim_words(text, 50))
-                fetch_outputs.append(text)
+                fetch_outputs[index] = text
             else:
-                fetch_outputs.append(str(result))
+                fetch_outputs[index] = redact_patent_text(str(result))
 
-    final_urls = [str(item.get("url") or "").strip() for item in candidates if item.get("url")]
+    final_urls = [str(item.get("url") or "").strip() for item in candidates
+                  if patent_document_url(str(item.get("url") or ""))]
     verification = ""
     if final_urls:
         try:
@@ -316,12 +324,12 @@ async def patent_evidence_pack(
                 warnings.append("URL verification failed; verified_url values remain false unless ALIVE was returned.")
         except Exception as exc:
             verification_failed = True
-            warnings.append(f"URL verification failed: {exc}")
+            warnings.append(f"URL verification failed: {provider_error_message(exc)}")
     verified = _verification_map(verification)
 
     hits: list[dict[str, Any]] = []
     for index, item in enumerate(candidates):
-        fetch_output = fetch_outputs[index] if index < len(fetch_outputs) else ""
+        fetch_output = fetch_outputs.get(index, "")
         evidence_level = _fetch_level(fetch_output) if fetch_output else "search_snippet_only"
         fetched_summary = _fetch_summary(fetch_output) if fetch_output else ""
         snippet = trim_words(_clean_hit_text(item.get("snippet")), 70)
@@ -415,4 +423,4 @@ async def patent_evidence_pack(
         "errors": list(search_payload.get("errors") or []),
         "warnings": list(search_payload.get("notes") or []) + warnings,
     }
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+    return json.dumps(sanitize_patent_value(payload), ensure_ascii=False, indent=2)

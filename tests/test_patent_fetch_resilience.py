@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 import tools.patent_fetch as pf
 
 BLOCK_HTML = (
@@ -20,6 +22,20 @@ REAL_HTML = (
 )
 
 
+@pytest.fixture(autouse=True)
+def offline_alternatives(monkeypatch):
+    async def empty(*args, **kwargs):
+        return ""
+    async def empty_page(*args, **kwargs):
+        return "", ""
+    monkeypatch.setattr(pf, "fetch_via_jina", empty)
+    monkeypatch.setattr(pf, "_wayback_patent_fetch", empty_page)
+    monkeypatch.setattr(pf, "PATENT_FETCH_PROVIDERS", (
+        pf.PatentFetchProvider("google_patents", pf._google_patents_fetch),
+    ))
+    pf._PATENT_FETCH_CACHE.clear()
+
+
 def test_is_bot_block_page_detects_known_markers():
     assert pf._is_bot_block_page(BLOCK_HTML) is True
     assert pf._is_bot_block_page(REAL_HTML) is False
@@ -27,7 +43,7 @@ def test_is_bot_block_page_detects_known_markers():
 
 
 async def test_google_patents_fetch_raises_when_blocked_and_wayback_unavailable(monkeypatch):
-    async def fake_fetch_page_html_and_text(url, timeout_ms=60000):
+    async def fake_fetch_page_html_and_text(url, timeout_ms=60000, **kwargs):
         return BLOCK_HTML, "blocked text"
 
     async def fake_wayback(url, timeout_ms):
@@ -42,8 +58,8 @@ async def test_google_patents_fetch_raises_when_blocked_and_wayback_unavailable(
         await pf._google_patents_fetch("https://patents.google.com/patent/US10831585B2/en", 30000)
 
 
-async def test_google_patents_fetch_recovers_via_wayback(monkeypatch):
-    async def fake_fetch_page_html_and_text(url, timeout_ms=60000):
+async def test_patent_fetch_recovers_via_independent_wayback(monkeypatch):
+    async def fake_fetch_page_html_and_text(url, timeout_ms=60000, **kwargs):
         return BLOCK_HTML, "blocked text"
 
     async def fake_wayback(url, timeout_ms):
@@ -52,15 +68,13 @@ async def test_google_patents_fetch_recovers_via_wayback(monkeypatch):
     monkeypatch.setattr(pf, "fetch_page_html_and_text", fake_fetch_page_html_and_text)
     monkeypatch.setattr(pf, "_wayback_patent_fetch", fake_wayback)
 
-    html, text = await pf._google_patents_fetch(
-        "https://patents.google.com/patent/US10831585B2/en", 30000
-    )
-    assert html == REAL_HTML
-    assert text == "real text"
+    result = await pf.patent_fetch("https://patents.google.com/patent/US10831585B2/en", 30000)
+    assert "EVIDENCE_LEVEL: CLAIM_VERIFIED" in result
+    assert "PROVIDER: wayback" in result
 
 
 async def test_google_patents_fetch_passthrough_when_not_blocked(monkeypatch):
-    async def fake_fetch_page_html_and_text(url, timeout_ms=60000):
+    async def fake_fetch_page_html_and_text(url, timeout_ms=60000, **kwargs):
         return REAL_HTML, "real text"
 
     monkeypatch.setattr(pf, "fetch_page_html_and_text", fake_fetch_page_html_and_text)
@@ -74,7 +88,7 @@ async def test_google_patents_fetch_respects_concurrency_semaphore(monkeypatch):
     active = 0
     peak = 0
 
-    async def fake_fetch_page_html_and_text(url, timeout_ms=60000):
+    async def fake_fetch_page_html_and_text(url, timeout_ms=60000, **kwargs):
         nonlocal active, peak
         active += 1
         peak = max(peak, active)
@@ -93,7 +107,7 @@ async def test_google_patents_fetch_respects_concurrency_semaphore(monkeypatch):
 
 
 async def test_patent_fetch_end_to_end_reports_blocked_status(monkeypatch):
-    async def fake_fetch_page_html_and_text(url, timeout_ms=60000):
+    async def fake_fetch_page_html_and_text(url, timeout_ms=60000, **kwargs):
         return BLOCK_HTML, "blocked text"
 
     async def fake_wayback(url, timeout_ms):
@@ -108,7 +122,7 @@ async def test_patent_fetch_end_to_end_reports_blocked_status(monkeypatch):
 
 
 async def test_patent_fetch_end_to_end_succeeds_when_not_blocked(monkeypatch):
-    async def fake_fetch_page_html_and_text(url, timeout_ms=60000):
+    async def fake_fetch_page_html_and_text(url, timeout_ms=60000, **kwargs):
         return REAL_HTML, "real text"
 
     monkeypatch.setattr(pf, "fetch_page_html_and_text", fake_fetch_page_html_and_text)
