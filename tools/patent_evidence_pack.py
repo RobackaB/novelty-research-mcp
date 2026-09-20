@@ -259,7 +259,10 @@ def select_candidates_for_verification(
         return []
     selected: list[tuple[int, dict[str, Any]]] = []
     for index, item in enumerate(candidates):
-        if not isinstance(item, dict) or not item.get("url"):
+        # str.strip() rather than truthiness: "   " is truthy, so a whitespace-only
+        # URL previously consumed a verification slot and then failed to fetch,
+        # silently costing a real candidate its place in the budget.
+        if not isinstance(item, dict) or not str(item.get("url") or "").strip():
             continue
         selected.append((index, item))
         if len(selected) >= budget:
