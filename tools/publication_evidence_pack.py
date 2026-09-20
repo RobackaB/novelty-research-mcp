@@ -279,6 +279,21 @@ async def publication_evidence_pack(
     errors = _errors_from_markers(search_output)
     if parse_error_count(search_output):
         warnings.append("Publication search reported provider errors; do not treat missing papers as negative evidence.")
+    elif search_status == "partial_failure" and not errors:
+        # Defence in depth for a legacy or malformed search result that reports a
+        # partial status with no structured diagnostic. The specific provider
+        # reason is unavailable here, so the fallback stays generic rather than
+        # attributing a failure to a provider that may not have failed.
+        errors = [
+            {
+                "type": "publication_search_partial",
+                "message": "Publication search reported incomplete retrieval.",
+            }
+        ]
+        warnings.append(
+            "Publication search reported incomplete retrieval without a specific "
+            "provider diagnostic; do not treat missing papers as negative evidence."
+        )
     if search_status == "failed":
         return json.dumps(
             {
