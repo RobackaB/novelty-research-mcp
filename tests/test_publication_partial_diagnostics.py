@@ -131,7 +131,7 @@ def test_healthy_search_introduces_no_spurious_errors(monkeypatch):
     assert "ERROR:" not in out
 
 
-# --- 5. complete failure keeps its semantics ----------------------------------
+# --- 5. complete failure keeps its semantics ---------------------------------
 
 def test_total_failure_semantics_are_unchanged(monkeypatch):
     async def boom(*_a, **_k):
@@ -149,14 +149,15 @@ def test_total_failure_semantics_are_unchanged(monkeypatch):
     assert parse_completed_marker(out) is False
 
 
-# --- 6. legacy / malformed partial markers -------------------------------------
+# --- 6. legacy / malformed partial markers ------------------------------------
 
 def test_legacy_partial_without_errors_gets_a_generic_diagnostic(monkeypatch):
     """A partial marker with ERROR_COUNT 0 must not stay unexplained."""
     legacy = (
-        "STATUS: PARTIAL_FAILURE\nCOMPLETED: FALSE\nELIABLE_NO_RESULTS: FALSE\nERROR_COUNT: 0\nQUERY: " + QUERY + "\n\n"
+        "STATUS: PARTIAL_FAILURE\nCOMPLETED: FALSE\nRELIABLE_NO_RESULTS: FALSE\n"
+        "ERROR_COUNT: 0\nQUERY: " + QUERY + "\n\n"
         + _block("Smart lock access control study", "10.1000/a",
-                "Smart door lock controlled by a mobile application using access codes.", 7.0)
+                 "Smart door lock controlled by a mobile application using access codes.", 7.0)
     )
 
     async def legacy_search(*_a, **_k):
@@ -203,7 +204,7 @@ def test_credentials_do_not_leak_through_the_new_diagnostics(monkeypatch):
     assert "apiKey" not in out
 
 
-# --- 8. determinism ---------------------------------------------------------
+# --- 8. determinism -----------------------------------------------------------
 
 def test_identical_outcomes_produce_identical_diagnostics(monkeypatch):
     from tools.publications_search import _partial_retrieval_errors
@@ -219,7 +220,7 @@ def test_identical_outcomes_produce_identical_diagnostics(monkeypatch):
     ]
 
 
-# --- negative control ----------------------------------------------------------
+# --- negative control ---------------------------------------------------------
 
 def test_restored_notes_only_behaviour_fails_the_structured_assertion(monkeypatch):
     """Historical behaviour: partial status carried by notes alone."""
