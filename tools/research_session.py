@@ -1935,7 +1935,10 @@ def _english_query_diagnostics(source_type: str, english_query: str) -> dict[str
         "english_query_used_for_scoring": received and source in {"patent", "publication", "web"},
     }
 
-def _add_english_query_diagnostics(ack_text: str, source_type: str, english_query: str) -> str:
+def _add_english_query_diagnostics(
+    ack_text: str, source_type: str, english_query: str, *,
+    used_for_execution: bool | None = None,
+) -> str:
     """Add English-query diagnostics to an existing JSON ack text."""
     try:
         payload = json.loads(ack_text)
@@ -1943,7 +1946,11 @@ def _add_english_query_diagnostics(ack_text: str, source_type: str, english_quer
         return ack_text
     if not isinstance(payload, dict):
         return ack_text
-    payload.update(_english_query_diagnostics(source_type, english_query))
+    diagnostics = _english_query_diagnostics(source_type, english_query)
+    if used_for_execution is not None:
+        diagnostics["english_query_used_for_search"] = bool(used_for_execution)
+        diagnostics["english_query_used_for_scoring"] = bool(used_for_execution)
+    payload.update(diagnostics)
     return _json(payload)
 
 def _begin_source_attempt(
@@ -3410,6 +3417,16 @@ def _too_generic_short_circuit(
         english_query=english_query,
     )
 
+def _attempt_english_query(attempt: int, english_query: str) -> str:
+    """Only the first source attempt may override its query with translation.
+
+    Use the resolved stored attempt, not the caller's optional attempt_no=0.
+    Later attempts carry execution-ready backend queries; a stale original
+    translation must not change retrieval, scoring or saved attempt provenance.
+    """
+    return english_query.strip() if attempt == 1 else ""
+
+
 async def patent_evidence_to_session(
     session_id: str,
     query: str,
@@ -3423,9 +3440,17 @@ async def patent_evidence_to_session(
 ) -> str:
     """Retrieve patent evidence and store it against the current research session."""
     english_query_clean = (english_query or "").strip()
+    received_translation = english_query_clean
+
+    def ack(payload: str, *, executed: bool = False) -> str:
+        return _add_english_query_diagnostics(
+            payload, "patent", received_translation,
+            used_for_execution=executed and bool(english_query_clean),
+        )
+
     received_source = str(source_type or "").strip().lower()
     if received_source and received_source != "patent":
-        return _error_ack("invalid_source_type", _clean_session_id(session_id), "patent", _safe_int(attempt_no), query_hash(query), "Envelope source_type did not match patent writer.", run_id=run_id, expected_source_type="patent", received_source_type=received_source, english_query=english_query_clean)
+        return ack(_error_ack("invalid_source_type", _clean_session_id(session_id), "patent", _safe_int(attempt_no), query_hash(query), "Envelope source_type did not match patent writer.", run_id=run_id, expected_source_type="patent", received_source_type=received_source, english_query=english_query_clean))
     clean_query = _writer_query(session_id, query, "patent", attempt_no)
     begin = _begin_source_attempt(
         session_id,
@@ -3437,11 +3462,12 @@ async def patent_evidence_to_session(
         tool_name="patent_evidence_to_session",
     )
     if begin["action"] == "duplicate":
-        return _add_english_query_diagnostics(_duplicate_ack(begin), "patent", english_query_clean)
+        return ack(_duplicate_ack(begin))
     if begin["action"] == "error":
-        return _add_english_query_diagnostics(str(begin["ack"]), "patent", english_query_clean)
+        return ack(str(begin["ack"]))
+    english_query_clean = _attempt_english_query(int(begin["attempt"]), received_translation)
     if _envelope_query_too_generic(session_id):
-        return _too_generic_short_circuit(
+        return ack(_too_generic_short_circuit(
             session_id=session_id,
             source_type="patent",
             query=clean_query,
@@ -3449,7 +3475,7 @@ async def patent_evidence_to_session(
             run_id=run_id,
             agent_name="patent_sqlite_writer_agent",
             english_query=english_query_clean,
-        )
+        ))
     atomic_requirements = _load_atomic_requirements(session_id)
     try:
         _collector = _new_decision_collector(
@@ -3470,10 +3496,10 @@ async def patent_evidence_to_session(
             # failure, and can never turn a successful retrieval into a failure.
             _persist_decision_events(_collector)
     except TimeoutError as exc:
-        return research_session_record_failure(session_id, "patent", clean_query, "timeout", "timeout", provider_error_message(exc), int(begin["attempt"]), run_id, "patent_sqlite_writer_agent", english_query_clean)
+        return ack(research_session_record_failure(session_id, "patent", clean_query, "timeout", "timeout", provider_error_message(exc), int(begin["attempt"]), run_id, "patent_sqlite_writer_agent", english_query_clean))
     except Exception as exc:
-        return research_session_record_failure(session_id, "patent", clean_query, "provider_error", exc.__class__.__name__, provider_error_message(exc), int(begin["attempt"]), run_id, "patent_sqlite_writer_agent", english_query_clean)
-    return research_session_save_evidence(
+        return ack(research_session_record_failure(session_id, "patent", clean_query, "provider_error", exc.__class__.__name__, provider_error_message(exc), int(begin["attempt"]), run_id, "patent_sqlite_writer_agent", english_query_clean))
+    return ack(research_session_save_evidence(
         session_id=session_id,
         source_type="patent",
         evidence_json=evidence,
@@ -3482,7 +3508,7 @@ async def patent_evidence_to_session(
         attempt=int(begin["attempt"]),
         run_id=run_id,
         english_query=english_query_clean,
-    )
+    ), executed=True)
 
 async def publication_evidence_to_session(
     session_id: str,
@@ -3497,9 +3523,17 @@ async def publication_evidence_to_session(
 ) -> str:
     """Retrieve publication evidence and store it against the current research session."""
     english_query_clean = (english_query or "").strip()
+    received_translation = english_query_clean
+
+    def ack(payload: str, *, executed: bool = False) -> str:
+        return _add_english_query_diagnostics(
+            payload, "publication", received_translation,
+            used_for_execution=executed and bool(english_query_clean),
+        )
+
     received_source = str(source_type or "").strip().lower()
     if received_source and received_source != "publication":
-        return _error_ack("invalid_source_type", _clean_session_id(session_id), "publication", _safe_int(attempt_no), query_hash(query), "Envelope source_type did not match publication writer.", run_id=run_id, expected_source_type="publication", received_source_type=received_source, english_query=english_query_clean)
+        return ack(_error_ack("invalid_source_type", _clean_session_id(session_id), "publication", _safe_int(attempt_no), query_hash(query), "Envelope source_type did not match publication writer.", run_id=run_id, expected_source_type="publication", received_source_type=received_source, english_query=english_query_clean))
     clean_query = _writer_query(session_id, query, "publication", attempt_no)
     begin = _begin_source_attempt(
         session_id,
@@ -3511,11 +3545,12 @@ async def publication_evidence_to_session(
         tool_name="publication_evidence_to_session",
     )
     if begin["action"] == "duplicate":
-        return _add_english_query_diagnostics(_duplicate_ack(begin), "publication", english_query_clean)
+        return ack(_duplicate_ack(begin))
     if begin["action"] == "error":
-        return _add_english_query_diagnostics(str(begin["ack"]), "publication", english_query_clean)
+        return ack(str(begin["ack"]))
+    english_query_clean = _attempt_english_query(int(begin["attempt"]), received_translation)
     if _envelope_query_too_generic(session_id):
-        return _too_generic_short_circuit(
+        return ack(_too_generic_short_circuit(
             session_id=session_id,
             source_type="publication",
             query=clean_query,
@@ -3523,7 +3558,7 @@ async def publication_evidence_to_session(
             run_id=run_id,
             agent_name="publication_sqlite_writer_agent",
             english_query=english_query_clean,
-        )
+        ))
     atomic_requirements = _load_atomic_requirements(session_id)
     try:
         _collector = _new_decision_collector(
@@ -3544,10 +3579,10 @@ async def publication_evidence_to_session(
             # failure, and can never turn a successful retrieval into a failure.
             _persist_decision_events(_collector)
     except TimeoutError as exc:
-        return research_session_record_failure(session_id, "publication", clean_query, "timeout", "timeout", str(exc), int(begin["attempt"]), run_id, "publication_sqlite_writer_agent", english_query_clean)
+        return ack(research_session_record_failure(session_id, "publication", clean_query, "timeout", "timeout", str(exc), int(begin["attempt"]), run_id, "publication_sqlite_writer_agent", english_query_clean))
     except Exception as exc:
-        return research_session_record_failure(session_id, "publication", clean_query, "provider_error", exc.__class__.__name__, str(exc), int(begin["attempt"]), run_id, "publication_sqlite_writer_agent", english_query_clean)
-    return research_session_save_evidence(
+        return ack(research_session_record_failure(session_id, "publication", clean_query, "provider_error", exc.__class__.__name__, str(exc), int(begin["attempt"]), run_id, "publication_sqlite_writer_agent", english_query_clean))
+    return ack(research_session_save_evidence(
         session_id=session_id,
         source_type="publication",
         evidence_json=evidence,
@@ -3556,7 +3591,7 @@ async def publication_evidence_to_session(
         attempt=int(begin["attempt"]),
         run_id=run_id,
         english_query=english_query_clean,
-    )
+    ), executed=True)
 
 async def web_evidence_to_session(
     session_id: str,
@@ -3571,9 +3606,17 @@ async def web_evidence_to_session(
 ) -> str:
     """Retrieve web evidence and store it against the current research session."""
     english_query_clean = (english_query or "").strip()
+    received_translation = english_query_clean
+
+    def ack(payload: str, *, executed: bool = False) -> str:
+        return _add_english_query_diagnostics(
+            payload, "web", received_translation,
+            used_for_execution=executed and bool(english_query_clean),
+        )
+
     received_source = str(source_type or "").strip().lower()
     if received_source and received_source != "web":
-        return _error_ack("invalid_source_type", _clean_session_id(session_id), "web", _safe_int(attempt_no), query_hash(query), "Envelope source_type did not match web writer.", run_id=run_id, expected_source_type="web", received_source_type=received_source, english_query=english_query_clean)
+        return ack(_error_ack("invalid_source_type", _clean_session_id(session_id), "web", _safe_int(attempt_no), query_hash(query), "Envelope source_type did not match web writer.", run_id=run_id, expected_source_type="web", received_source_type=received_source, english_query=english_query_clean))
     clean_query = _writer_query(session_id, query, "web", attempt_no)
     begin = _begin_source_attempt(
         session_id,
@@ -3585,11 +3628,12 @@ async def web_evidence_to_session(
         tool_name="web_evidence_to_session",
     )
     if begin["action"] == "duplicate":
-        return _add_english_query_diagnostics(_duplicate_ack(begin), "web", english_query_clean)
+        return ack(_duplicate_ack(begin))
     if begin["action"] == "error":
-        return _add_english_query_diagnostics(str(begin["ack"]), "web", english_query_clean)
+        return ack(str(begin["ack"]))
+    english_query_clean = _attempt_english_query(int(begin["attempt"]), received_translation)
     if _envelope_query_too_generic(session_id):
-        return _too_generic_short_circuit(
+        return ack(_too_generic_short_circuit(
             session_id=session_id,
             source_type="web",
             query=clean_query,
@@ -3597,7 +3641,7 @@ async def web_evidence_to_session(
             run_id=run_id,
             agent_name="web_sqlite_writer_agent",
             english_query=english_query_clean,
-        )
+        ))
     atomic_requirements = _load_atomic_requirements(session_id)
     try:
         _collector = _new_decision_collector(
@@ -3618,10 +3662,10 @@ async def web_evidence_to_session(
             # failure, and can never turn a successful retrieval into a failure.
             _persist_decision_events(_collector)
     except TimeoutError as exc:
-        return research_session_record_failure(session_id, "web", clean_query, "timeout", "timeout", str(exc), int(begin["attempt"]), run_id, "web_sqlite_writer_agent", english_query_clean)
+        return ack(research_session_record_failure(session_id, "web", clean_query, "timeout", "timeout", str(exc), int(begin["attempt"]), run_id, "web_sqlite_writer_agent", english_query_clean))
     except Exception as exc:
-        return research_session_record_failure(session_id, "web", clean_query, "provider_error", exc.__class__.__name__, str(exc), int(begin["attempt"]), run_id, "web_sqlite_writer_agent", english_query_clean)
-    return research_session_save_evidence(
+        return ack(research_session_record_failure(session_id, "web", clean_query, "provider_error", exc.__class__.__name__, str(exc), int(begin["attempt"]), run_id, "web_sqlite_writer_agent", english_query_clean))
+    return ack(research_session_save_evidence(
         session_id=session_id,
         source_type="web",
         evidence_json=evidence,
@@ -3630,4 +3674,4 @@ async def web_evidence_to_session(
         attempt=int(begin["attempt"]),
         run_id=run_id,
         english_query=english_query_clean,
-    )
+    ), executed=True)
