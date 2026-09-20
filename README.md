@@ -28,6 +28,11 @@ post-thesis portfolio milestone, not a production-readiness claim.
   provenance stored separately from production evidence. Capture failures do not
   change retrieval or retry decisions. Provider errors omit credential-bearing
   exception text.
+- **Reliability hardening:** a documented defect→regression-test→controlled-fix→
+  remeasurement loop covering retry saturation, patent verification depth and
+  identity, partial-retrieval diagnostics, provider observability and
+  completeness propagation. Each fix landed with a control proving the test
+  fails against the old behaviour.
 - **Offline evaluation infrastructure:** read-only snapshot import, explicit
   identity reconciliation, blank blinded worksheets and deterministic original-query
   roster rehearsal. These Goal 5C tools currently accept synthetic inputs only.
@@ -62,7 +67,7 @@ The tools are `research_session_start`, `research_session_understand_query`,
 
 | Evidence | Current scope |
 |---|---|
-| Automated verification | 954 tests at the pre-release baseline; Python 3.11–3.13 CI, deterministic subprocess checks and negative controls. |
+| Automated verification | **1311 tests** on Python 3.11–3.13 CI. Determinism is checked by re-running two digested workloads in a fresh interpreter per `PYTHONHASHSEED`, and behavioural fixes carry defect-restoration controls that must fail when the defect is reinstated. |
 | Historical relevance benchmark | **3 queries / 20 candidates**; fixed-pool generic-scorer regression benchmark. Query-macro precision **0.611**, recall **0.833**, F1 **0.683**. |
 | Goal 5C implementation | Synthetic/offline Phases 1–3 completed; import, reconciliation/blinding and roster-freeze contracts are tested. |
 | Real evaluation study | **Not performed.** No new participant acquisition, human labels, workflow metrics or prospective threshold confirmation. |

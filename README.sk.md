@@ -21,7 +21,7 @@ míľnik po technickom audite, nie tvrdenie o pripravenosti na produkčné nasad
   explicitné zosúladenie identít, prázdne zaslepené hárky a deterministický výber dotazov.
 
 Backend poskytuje sedem MCP nástrojov. Ich rozhrania kontrolujú testy; aktuálny
-základ má **954 testov** a CI pre Python 3.11–3.13. Determinizmus sa vzťahuje na
+základ má **1311 testov** a CI pre Python 3.11–3.13. Determinizmus sa vzťahuje na
 rovnaké vstupy a konfiguráciu, nie na meniace sa výsledky externých služieb.
 
 ## Najprv offline overenie
