@@ -59,7 +59,7 @@ def extract_call_result_items(result: CallToolResult) -> list[Any]:
     as a single item for the fallback text parser.
     """
     if result.isError:
-        return []
+        raise RuntimeError("AlphaXiv returned an MCP tool error")
     structured = result.structuredContent
     if isinstance(structured, dict):
         for key in _STRUCTURED_LIST_KEYS:
@@ -111,7 +111,8 @@ async def discover_papers_via_session(
 async def discover_papers(query: str, timeout_s: float = ALPHAXIV_TIMEOUT_S) -> list[Any]:
     """Connect to the AlphaXiv MCP server and search for relevant publications.
 
-    Returns an empty list if the key is not set or the call fails in any way.
+    Returns an empty list if the key is not set. Failures raise a safe exception
+    so the publication aggregator can distinguish them from a clean empty result.
     This provider is always supplementary and must never break publication
     search, nor slow it down beyond its own timeout.
     """
@@ -131,4 +132,4 @@ async def discover_papers(query: str, timeout_s: float = ALPHAXIV_TIMEOUT_S) -> 
         return await asyncio.wait_for(_run(), timeout=timeout_s)
     except Exception as exc:
         LOGGER.info("alphaxiv discover_papers failed: %s", provider_error_message(exc))
-        return []
+        raise RuntimeError(provider_error_message(exc)) from None

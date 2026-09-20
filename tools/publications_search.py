@@ -21,7 +21,7 @@ from .relevance import (
     _MIN_CORPUS_FOR_IDF, build_corpus_idf, discriminative_tokens, evidence_score,
     is_relevant, salient_query_tokens, subject_anchors, tokens,
 )
-from .result_contract import NormalizedResult, prepend_markers
+from .result_contract import NormalizedResult, prepend_markers, parse_status_marker, parse_error_count
 from .search_bounds import section_query_variants
 
 FAILURE_TERMS = ("tool_error:", "429", "rate limit", "too many requests", "timed out", "timeout", "failed because")
@@ -199,14 +199,15 @@ def _relevant_abstract_excerpt(abstract: str, query: str, max_words: int = ABSTR
     return trim_words(excerpt, max_words)
 
 
-def _publication_failure(reason: str) -> str:
+def _publication_failure(reason: str, *, provider_errors: list[str] | None = None) -> str:
     """Build the response for a complete publication search failure."""
     return prepend_markers(
         NormalizedResult(
             status="failed",
             completed=False,
             reliable_no_results=False,
-            errors=[{"type": "publication_search_failed", "message": reason}],
+            errors=[{"type": "publication_search_failed", "message": reason}]
+            + _partial_retrieval_errors(provider_errors or [], False),
             notes=["Do not treat this as evidence that no relevant publications exist."],
         ),
         "\n".join([
@@ -218,14 +219,15 @@ def _publication_failure(reason: str) -> str:
     )
 
 
-def _publication_partial(reason: str, body: str) -> str:
+def _publication_partial(reason: str, body: str, *, provider_errors: list[str] | None = None) -> str:
     """Build the response for incomplete publication results."""
     return prepend_markers(
         NormalizedResult(
             status="partial_failure",
             completed=False,
             reliable_no_results=False,
-            errors=[{"type": "publication_search_partial", "message": reason}],
+            errors=[{"type": "publication_search_partial", "message": reason}]
+            + _partial_retrieval_errors(provider_errors or [], False),
             notes=["Fallback results are partial; do not treat missing publications as negative evidence."],
         ),
         body,
@@ -477,34 +479,54 @@ def _alpha_text_blocks(output: str, relevance_query: str, max_results: int, *, _
     return blocks
 
 
+class _ProviderBlocks(list[tuple[float, str]]):
+    """Internal hits plus safe errors consumed by the existing PR #34 model."""
+
+    def __init__(self, *, errors: list[str] | None = None) -> None:
+        super().__init__()
+        self.errors = list(errors or [])
+
+
+def _provider_blocks(outcome: Any, provider: str, errors: list[str]) -> list[tuple[float, str]]:
+    """Collect diagnostics in declared provider order, never completion order."""
+    if isinstance(outcome, BaseException):
+        errors.append(f"{provider}: {provider_error_message(outcome)}")
+        return []
+    errors.extend(f"{provider}: {error}" for error in getattr(outcome, "errors", []))
+    return outcome
+
+
 async def _alpha_search_blocks(search_queries: list[str], relevance_query: str, max_results: int, seen: set[str]) -> list[tuple[float, str]]:
     """Search publications through the AlphaXiv MCP server and return deduplicated scored blocks."""
-    blocks: list[tuple[float, str]] = []
+    blocks = _ProviderBlocks()
     for search_query in search_queries:
-        items = await alphaxiv_discover_papers(search_query)
-        if not items:
-            continue
-        parsed_blocks: list[tuple[float, str]] = []
-        for raw_item in items:
-            if isinstance(raw_item, dict):
-                for item in _iter_alpha_items(raw_item):
-                    formatted = _format_alpha_item(item, relevance_query, _executed_query=search_query)
-                    if formatted:
-                        parsed_blocks.append(formatted)
-            elif isinstance(raw_item, str) and raw_item.strip():
-                parsed_blocks.extend(_alpha_text_blocks(raw_item, relevance_query, max_results, _executed_query=search_query))
-        for score, block in parsed_blocks:
-            key = block.lower()
-            _capture_publication(block=block, decision_stage="dedupe",
-                                 decision_reason="duplicate_of" if key in seen else "accepted",
-                                 decision_query=relevance_query, query_variant=search_query,
-                                 provider="alphaxiv", payload={"scope": "provider", "dedupe_key": key})
-            if key in seen:
+        try:
+            items = await alphaxiv_discover_papers(search_query)
+            if not items:
                 continue
-            seen.add(key)
-            blocks.append((score, block))
-        if len(blocks) >= max_results:
-            break
+            parsed_blocks: list[tuple[float, str]] = []
+            for raw_item in items:
+                if isinstance(raw_item, dict):
+                    for item in _iter_alpha_items(raw_item):
+                        formatted = _format_alpha_item(item, relevance_query, _executed_query=search_query)
+                        if formatted:
+                            parsed_blocks.append(formatted)
+                elif isinstance(raw_item, str) and raw_item.strip():
+                    parsed_blocks.extend(_alpha_text_blocks(raw_item, relevance_query, max_results, _executed_query=search_query))
+            for score, block in parsed_blocks:
+                key = block.lower()
+                _capture_publication(block=block, decision_stage="dedupe",
+                                     decision_reason="duplicate_of" if key in seen else "accepted",
+                                     decision_query=relevance_query, query_variant=search_query,
+                                     provider="alphaxiv", payload={"scope": "provider", "dedupe_key": key})
+                if key in seen:
+                    continue
+                seen.add(key)
+                blocks.append((score, block))
+            if len(blocks) >= max_results:
+                break
+        except Exception as exc:
+            blocks.errors.append(provider_error_message(exc))
     return blocks
 
 
@@ -573,7 +595,9 @@ def _parse_pubmed_efetch_xml(xml_text: str) -> list[dict[str, str]]:
     try:
         root = ET.fromstring(xml_text or "")
     except ET.ParseError:
-        return []
+        raise ValueError("PubMed returned malformed XML") from None
+    if root.find(".//ERROR") is not None or root.tag == "ERROR":
+        raise ValueError("PubMed returned an error response")
     out: list[dict[str, str]] = []
     for article in root.findall(".//PubmedArticle"):
         title_node = article.find(".//Article/ArticleTitle")
@@ -684,11 +708,12 @@ async def _pubmed_search_records(query: str, limit: int) -> list[dict[str, str]]
             )
             esearch_response.raise_for_status()
             esearch_payload = esearch_response.json()
-        except Exception:
-            return []
-        ids = (
-            ((esearch_payload or {}).get("esearchresult") or {}).get("idlist") or []
-        )
+        except Exception as exc:
+            raise RuntimeError(provider_error_message(exc)) from None
+        result = esearch_payload.get("esearchresult") if isinstance(esearch_payload, dict) else None
+        if not isinstance(result, dict) or result.get("ERROR") or not isinstance(result.get("idlist"), list):
+            raise ValueError("PubMed returned an invalid search response")
+        ids = result["idlist"]
         ids = [str(pmid).strip() for pmid in ids if str(pmid).strip()]
         if not ids:
             return []
@@ -699,8 +724,8 @@ async def _pubmed_search_records(query: str, limit: int) -> list[dict[str, str]]
                 params=efetch_params,
             )
             efetch_response.raise_for_status()
-        except Exception:
-            return []
+        except Exception as exc:
+            raise RuntimeError(provider_error_message(exc)) from None
         return _parse_pubmed_efetch_xml(efetch_response.text)
 
 
@@ -711,68 +736,71 @@ async def _pubmed_blocks(
     seen: set[str],
 ) -> list[tuple[float, str]]:
     """Select the relevant PubMed records and convert them into text blocks."""
-    blocks: list[tuple[float, str]] = []
+    blocks = _ProviderBlocks()
     for search_query in search_queries:
-        records = await _pubmed_search_records(search_query, max_results)
-        for record in records:
-            title = record.get("title") or ""
-            abstract = record.get("abstract") or ""
-            if not title or not abstract:
-                continue
-            doi = record.get("doi") or ""
-            pmid = record.get("pmid") or ""
-            key = (
-                f"doi:{doi.lower()}" if doi else (f"pmid:{pmid}" if pmid else f"title:{title.lower()}")
-            )
-            _capture_publication(block=f"{title} {abstract}", title=title,
-                                 url=f"https://doi.org/{doi}" if doi else f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else "",
-                                 decision_stage="dedupe", decision_reason="duplicate_of" if key in seen else "accepted",
-                                 provider="pubmed", query_variant=search_query, decision_query=relevance_query,
-                                 payload={"scope": "provider", "dedupe_key": key})
-            if key in seen:
-                continue
-            seen.add(key)
-            score = evidence_score(relevance_query, f"{title} {abstract}", "PUBLICATION")
-            keep = is_relevant(
-                relevance_query,
-                f"{title} {abstract}",
-                "PUBLICATION",
-                threshold=MIN_PUBLICATION_RELEVANCE_SCORE,
-            )
-            _record_provider_gate(None, block=f"{title} {abstract}", query=relevance_query,
-                                  executed_query=search_query, provider="pubmed", score=score, keep=keep,
-                                  title=title, url=f"https://doi.org/{doi}" if doi else f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else "")
-            if not keep:
-                continue
-            blocks.append(
-                (
-                    score,
-                    _pubmed_block(
-                        title,
-                        record.get("authors") or "",
-                        record.get("year") or "",
-                        _relevant_abstract_excerpt(abstract, relevance_query),
-                        doi,
-                        pmid,
-                        score,
-                    ),
+        try:
+            records = await _pubmed_search_records(search_query, max_results)
+            for record in records:
+                title = record.get("title") or ""
+                abstract = record.get("abstract") or ""
+                if not title or not abstract:
+                    continue
+                doi = record.get("doi") or ""
+                pmid = record.get("pmid") or ""
+                key = (
+                    f"doi:{doi.lower()}" if doi else (f"pmid:{pmid}" if pmid else f"title:{title.lower()}")
                 )
-            )
-            _remember_publication(blocks[-1][1], "pubmed", search_query,
-                                  identity_title=title, identity_score_text=f"{title} {abstract}")
-        if len(blocks) >= max_results:
-            break
+                _capture_publication(block=f"{title} {abstract}", title=title,
+                                     url=f"https://doi.org/{doi}" if doi else f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else "",
+                                     decision_stage="dedupe", decision_reason="duplicate_of" if key in seen else "accepted",
+                                     provider="pubmed", query_variant=search_query, decision_query=relevance_query,
+                                     payload={"scope": "provider", "dedupe_key": key})
+                if key in seen:
+                    continue
+                seen.add(key)
+                score = evidence_score(relevance_query, f"{title} {abstract}", "PUBLICATION")
+                keep = is_relevant(
+                    relevance_query,
+                    f"{title} {abstract}",
+                    "PUBLICATION",
+                    threshold=MIN_PUBLICATION_RELEVANCE_SCORE,
+                )
+                _record_provider_gate(None, block=f"{title} {abstract}", query=relevance_query,
+                                      executed_query=search_query, provider="pubmed", score=score, keep=keep,
+                                      title=title, url=f"https://doi.org/{doi}" if doi else f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else "")
+                if not keep:
+                    continue
+                blocks.append(
+                    (
+                        score,
+                        _pubmed_block(
+                            title,
+                            record.get("authors") or "",
+                            record.get("year") or "",
+                            _relevant_abstract_excerpt(abstract, relevance_query),
+                            doi,
+                            pmid,
+                            score,
+                        ),
+                    )
+                )
+                _remember_publication(blocks[-1][1], "pubmed", search_query,
+                                      identity_title=title, identity_score_text=f"{title} {abstract}")
+            if len(blocks) >= max_results:
+                break
+        except Exception as exc:
+            blocks.errors.append(provider_error_message(exc))
     return blocks
 
 
 async def _pubmed_blocks_safe(
     search_queries: list[str], relevance_query: str, max_results: int
 ) -> list[tuple[float, str]]:
-    """Run the PubMed search safely, returning an empty list on error."""
+    """Run the PubMed search with errors preserved for the aggregator."""
     try:
         return await _pubmed_blocks(search_queries, relevance_query, max_results, set())
-    except Exception:
-        return []
+    except Exception as exc:
+        return _ProviderBlocks(errors=[provider_error_message(exc)])
 
 
 def _reconstruct_openalex_abstract(inverted: object) -> str:
@@ -874,52 +902,52 @@ async def _openalex_blocks(
     seen: set[str],
 ) -> list[tuple[float, str]]:
     """Select the relevant OpenAlex records and convert them into text blocks."""
-    blocks: list[tuple[float, str]] = []
+    blocks = _ProviderBlocks()
     for search_query in search_queries:
         try:
             results = await _openalex_search(search_query, max_results)
-        except Exception:
-            continue
-        for title, authors, year, abstract, doi_url, work_url in results:
-            key = doi_url.lower() if doi_url != "Not available" else title.lower()
-            _capture_publication(block=f"{title} {abstract}", title=title,
-                                 url=doi_url if doi_url != "Not available" else work_url,
-                                 decision_stage="dedupe", decision_reason="duplicate_of" if key and key in seen else "accepted",
-                                 provider="openalex", query_variant=search_query, decision_query=relevance_query,
-                                 payload={"scope": "provider", "dedupe_key": key})
-            if key and key in seen:
-                continue
-            if key:
-                seen.add(key)
-            score = evidence_score(relevance_query, f"{title} {abstract}", "PUBLICATION")
-            keep = is_relevant(
-                relevance_query,
-                f"{title} {abstract}",
-                "PUBLICATION",
-                threshold=MIN_PUBLICATION_RELEVANCE_SCORE,
-            )
-            _record_provider_gate(None, block=f"{title} {abstract}", query=relevance_query,
-                                  executed_query=search_query, provider="openalex", score=score, keep=keep,
-                                  title=title, url=doi_url if doi_url != "Not available" else work_url)
-            if not keep:
-                continue
-            excerpt = _relevant_abstract_excerpt(abstract, relevance_query)
-            blocks.append((score, _openalex_block(title, authors, year, excerpt, doi_url, work_url, score)))
-            _remember_publication(blocks[-1][1], "openalex", search_query,
-                                  identity_title=title, identity_score_text=f"{title} {abstract}")
-        if len(blocks) >= max_results:
-            break
+            for title, authors, year, abstract, doi_url, work_url in results:
+                key = doi_url.lower() if doi_url != "Not available" else title.lower()
+                _capture_publication(block=f"{title} {abstract}", title=title,
+                                     url=doi_url if doi_url != "Not available" else work_url,
+                                     decision_stage="dedupe", decision_reason="duplicate_of" if key and key in seen else "accepted",
+                                     provider="openalex", query_variant=search_query, decision_query=relevance_query,
+                                     payload={"scope": "provider", "dedupe_key": key})
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                score = evidence_score(relevance_query, f"{title} {abstract}", "PUBLICATION")
+                keep = is_relevant(
+                    relevance_query,
+                    f"{title} {abstract}",
+                    "PUBLICATION",
+                    threshold=MIN_PUBLICATION_RELEVANCE_SCORE,
+                )
+                _record_provider_gate(None, block=f"{title} {abstract}", query=relevance_query,
+                                      executed_query=search_query, provider="openalex", score=score, keep=keep,
+                                      title=title, url=doi_url if doi_url != "Not available" else work_url)
+                if not keep:
+                    continue
+                excerpt = _relevant_abstract_excerpt(abstract, relevance_query)
+                blocks.append((score, _openalex_block(title, authors, year, excerpt, doi_url, work_url, score)))
+                _remember_publication(blocks[-1][1], "openalex", search_query,
+                                      identity_title=title, identity_score_text=f"{title} {abstract}")
+            if len(blocks) >= max_results:
+                break
+        except Exception as exc:
+            blocks.errors.append(provider_error_message(exc))
     return blocks
 
 
 async def _openalex_blocks_safe(
     search_queries: list[str], relevance_query: str, max_results: int
 ) -> list[tuple[float, str]]:
-    """Run the OpenAlex search safely, returning an empty list on error."""
+    """Run the OpenAlex search with errors preserved for the aggregator."""
     try:
         return await _openalex_blocks(search_queries, relevance_query, max_results, set())
-    except Exception:
-        return []
+    except Exception as exc:
+        return _ProviderBlocks(errors=[provider_error_message(exc)])
 
 
 async def _crossref_blocks(
@@ -929,36 +957,39 @@ async def _crossref_blocks(
     seen: set[str],
 ) -> list[tuple[float, str]]:
     """Select the relevant Crossref records and convert them into text blocks."""
-    blocks: list[tuple[float, str]] = []
+    blocks = _ProviderBlocks()
     for search_query in search_queries:
-        for title, authors, year, abstract, doi_url in await _crossref_search(search_query, max_results):
-            key = doi_url.lower() if doi_url != "Not available" else title.lower()
-            _capture_publication(block=f"{title} {abstract}", title=title, url=doi_url,
-                                 decision_stage="dedupe", decision_reason="duplicate_of" if key and key in seen else "accepted",
-                                 provider="crossref", query_variant=search_query, decision_query=relevance_query,
-                                 payload={"scope": "provider", "dedupe_key": key})
-            if key and key in seen:
-                continue
-            if key:
-                seen.add(key)
-            score = evidence_score(relevance_query, f"{title} {abstract}", "PUBLICATION")
-            keep = is_relevant(
-                relevance_query,
-                f"{title} {abstract}",
-                "PUBLICATION",
-                threshold=MIN_PUBLICATION_RELEVANCE_SCORE,
-            )
-            _record_provider_gate(None, block=f"{title} {abstract}", query=relevance_query,
-                                  executed_query=search_query, provider="crossref", score=score, keep=keep,
-                                  title=title, url=doi_url)
-            if not keep:
-                continue
-            excerpt = _relevant_abstract_excerpt(abstract, relevance_query)
-            blocks.append((score, _crossref_block(title, authors, year, excerpt, doi_url, score)))
-            _remember_publication(blocks[-1][1], "crossref", search_query,
-                                  identity_title=title, identity_score_text=f"{title} {abstract}")
-        if len(blocks) >= max_results:
-            break
+        try:
+            for title, authors, year, abstract, doi_url in await _crossref_search(search_query, max_results):
+                key = doi_url.lower() if doi_url != "Not available" else title.lower()
+                _capture_publication(block=f"{title} {abstract}", title=title, url=doi_url,
+                                     decision_stage="dedupe", decision_reason="duplicate_of" if key and key in seen else "accepted",
+                                     provider="crossref", query_variant=search_query, decision_query=relevance_query,
+                                     payload={"scope": "provider", "dedupe_key": key})
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                score = evidence_score(relevance_query, f"{title} {abstract}", "PUBLICATION")
+                keep = is_relevant(
+                    relevance_query,
+                    f"{title} {abstract}",
+                    "PUBLICATION",
+                    threshold=MIN_PUBLICATION_RELEVANCE_SCORE,
+                )
+                _record_provider_gate(None, block=f"{title} {abstract}", query=relevance_query,
+                                      executed_query=search_query, provider="crossref", score=score, keep=keep,
+                                      title=title, url=doi_url)
+                if not keep:
+                    continue
+                excerpt = _relevant_abstract_excerpt(abstract, relevance_query)
+                blocks.append((score, _crossref_block(title, authors, year, excerpt, doi_url, score)))
+                _remember_publication(blocks[-1][1], "crossref", search_query,
+                                      identity_title=title, identity_score_text=f"{title} {abstract}")
+            if len(blocks) >= max_results:
+                break
+        except Exception as exc:
+            blocks.errors.append(provider_error_message(exc))
     return blocks
 
 
@@ -1146,33 +1177,37 @@ async def _semantic_scholar_blocks(
 async def _crossref_blocks_safe(
     search_queries: list[str], relevance_query: str, max_results: int
 ) -> list[tuple[float, str]]:
-    """Run the Crossref search safely, returning an empty list on error."""
+    """Run the Crossref search with errors preserved for the aggregator."""
     try:
         return await _crossref_blocks(search_queries, relevance_query, max_results, set())
-    except Exception:
-        return []
+    except Exception as exc:
+        return _ProviderBlocks(errors=[provider_error_message(exc)])
 
 
 async def _alpha_blocks_safe(
     search_queries: list[str], relevance_query: str, max_results: int
 ) -> list[tuple[float, str]]:
-    """Run the AlphaXiv search safely, returning an empty list on error."""
+    """Run the AlphaXiv search with errors preserved for the aggregator."""
     try:
         return await _alpha_search_blocks(search_queries, relevance_query, max_results, set())
-    except Exception:
-        return []
+    except Exception as exc:
+        return _ProviderBlocks(errors=[provider_error_message(exc)])
 
 
 async def _arxiv_blocks_safe(
     search_queries: list[str], relevance_query: str, max_results: int
 ) -> list[tuple[float, str]]:
     """Run arXiv as a parallel provider and return scored publication blocks."""
-    try:
-        blocks: list[tuple[float, str]] = []
-        seen: set[str] = set()
-        for search_query in search_queries:
+    blocks = _ProviderBlocks()
+    seen: set[str] = set()
+    for search_query in search_queries:
+        try:
             output = await arxiv_search(search_query, max_results)
-            if _looks_failed(output):
+            status = parse_status_marker(output)
+            failed = status == "failed" or (status is None and _looks_failed(output))
+            if failed or status == "partial_failure" or parse_error_count(output):
+                blocks.errors.append("arXiv reported incomplete retrieval")
+            if failed:
                 continue
             for block in re.split(r"\n\s*\n", output or ""):
                 block = block.strip()
@@ -1201,9 +1236,9 @@ async def _arxiv_blocks_safe(
                                       identity_score_text=block)
             if len(blocks) >= max_results:
                 break
-        return blocks
-    except Exception:
-        return []
+        except Exception as exc:
+            blocks.errors.append(provider_error_message(exc))
+    return blocks
 
 
 def _partial_retrieval_errors(
@@ -1288,35 +1323,11 @@ async def _publications_search(
             if primary_errored:
                 provider_errors.append("semantic_scholar: HTTP error during one or more variants")
 
-        cr_blocks: list[tuple[float, str]] = []
-        if isinstance(cr_outcome, BaseException):
-            provider_errors.append(f"crossref: {provider_error_message(cr_outcome)}")
-        else:
-            cr_blocks = cr_outcome
-
-        ax_blocks: list[tuple[float, str]] = []
-        if isinstance(ax_outcome, BaseException):
-            provider_errors.append(f"alphaxiv: {provider_error_message(ax_outcome)}")
-        else:
-            ax_blocks = ax_outcome
-
-        pubmed_blocks: list[tuple[float, str]] = []
-        if isinstance(pubmed_outcome, BaseException):
-            provider_errors.append(f"pubmed: {provider_error_message(pubmed_outcome)}")
-        else:
-            pubmed_blocks = pubmed_outcome
-
-        openalex_blocks: list[tuple[float, str]] = []
-        if isinstance(openalex_outcome, BaseException):
-            provider_errors.append(f"openalex: {provider_error_message(openalex_outcome)}")
-        else:
-            openalex_blocks = openalex_outcome
-
-        arxiv_blocks: list[tuple[float, str]] = []
-        if isinstance(arxiv_outcome, BaseException):
-            provider_errors.append(f"arxiv: {provider_error_message(arxiv_outcome)}")
-        else:
-            arxiv_blocks = arxiv_outcome
+        cr_blocks = _provider_blocks(cr_outcome, "crossref", provider_errors)
+        ax_blocks = _provider_blocks(ax_outcome, "alphaxiv", provider_errors)
+        pubmed_blocks = _provider_blocks(pubmed_outcome, "pubmed", provider_errors)
+        openalex_blocks = _provider_blocks(openalex_outcome, "openalex", provider_errors)
+        arxiv_blocks = _provider_blocks(arxiv_outcome, "arxiv", provider_errors)
 
         merged: list[tuple[float, str]] = []
         seen_dois: set[str] = set()
@@ -1416,7 +1427,8 @@ async def _publications_search(
                 fallback = ""
             if _looks_failed(fallback):
                 return _publication_failure(
-                    "Semantic Scholar returned 429 and Crossref/AlphaXiv/ArXiv fallbacks also failed or were rate-limited."
+                    "Semantic Scholar returned 429 and Crossref/AlphaXiv/ArXiv fallbacks also failed or were rate-limited.",
+                    provider_errors=provider_errors,
                 )
             filtered = (
                 _filter_publication_text(
@@ -1433,17 +1445,22 @@ async def _publications_search(
                 return _publication_partial(
                     "Semantic Scholar returned 429 and Crossref/AlphaXiv/ArXiv fallbacks yielded no usable relevant records.",
                     "Publication search incomplete; Crossref/ArXiv fallbacks yielded no usable relevant records. Do not treat this as evidence that no relevant publications exist.",
+                    provider_errors=provider_errors,
                 )
             return _publication_partial(
                 "Semantic Scholar returned 429; ArXiv fallback supplied partial relevant records.",
                 "Semantic Scholar rate limit was reached, so ArXiv fallback results are returned instead.\n"
                 f"{filtered}",
+                provider_errors=provider_errors,
             )
 
         if primary_errored or provider_errors:
-            return _publication_partial(
-                "All publication providers either errored or returned no usable records: "
-                + "; ".join(provider_errors[:3]),
+            return prepend_markers(
+                NormalizedResult(
+                    status="partial_failure", completed=False, reliable_no_results=False,
+                    query=relevance_query,
+                    errors=_partial_retrieval_errors(provider_errors, False),
+                ),
                 "Publication search incomplete; one or more providers errored and no usable records were returned. Do not treat this as evidence that no relevant publications exist.",
             )
         if _low_confidence_no_results_query(query, search_queries):

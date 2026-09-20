@@ -293,13 +293,15 @@ async def test_alphaxiv_failure_log_is_safe_and_still_returns_no_records(monkeyp
     monkeypatch.setattr(alphaxiv, "alphaxiv_api_key", lambda: SECRET)
     monkeypatch.setattr(alphaxiv, "_streamable_http_client", failing_transport)
     caplog.set_level(logging.INFO, logger="tools.alphaxiv_client")
-    assert await alphaxiv.discover_papers(QUERY) == []
+    with pytest.raises(RuntimeError, match="HTTPStatusError") as caught:
+        await alphaxiv.discover_papers(QUERY)
+    assert SECRET not in str(caught.value)
     assert "HTTPStatusError (HTTP 403)" in caplog.text
     assert SECRET not in caplog.text
 
 
 @pytest.mark.parametrize("failing_stage", ["esearch", "efetch"])
-async def test_pubmed_request_errors_already_return_no_raw_diagnostic(monkeypatch, failing_stage):
+async def test_pubmed_request_errors_propagate_safe_diagnostic(monkeypatch, failing_stage):
     real_client = httpx.AsyncClient
     requests = []
 
@@ -314,5 +316,7 @@ async def test_pubmed_request_errors_already_return_no_raw_diagnostic(monkeypatc
     monkeypatch.setattr(publications.httpx, "AsyncClient", lambda **kwargs: real_client(
         transport=httpx.MockTransport(handler), **kwargs,
     ))
-    assert await publications._pubmed_search_records(QUERY, 5) == []
+    with pytest.raises(RuntimeError, match="HTTPStatusError") as caught:
+        await publications._pubmed_search_records(QUERY, 5)
+    assert SECRET not in str(caught.value)
     assert len(requests) == (1 if failing_stage == "esearch" else 2)

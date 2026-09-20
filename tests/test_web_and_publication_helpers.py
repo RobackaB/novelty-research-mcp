@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tools.publications_search import (
     _fallback_publication_queries,
     _publication_dedupe_keys,
@@ -141,4 +143,5 @@ def test_parse_pubmed_efetch_xml():
 
 
 def test_parse_pubmed_efetch_xml_malformed():
-    assert _parse_pubmed_efetch_xml("<not-xml") == []
+    with pytest.raises(ValueError, match="malformed XML"):
+        _parse_pubmed_efetch_xml("<not-xml")

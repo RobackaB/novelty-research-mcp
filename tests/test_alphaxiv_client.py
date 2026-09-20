@@ -83,7 +83,7 @@ async def test_discover_papers_via_session_empty_result():
     assert items == []
 
 
-async def test_discover_papers_via_session_tool_error_returns_empty():
+async def test_discover_papers_via_session_tool_error_is_observable():
     server = FastMCP("alphaxiv-error-test")
 
     @server.tool()
@@ -92,8 +92,8 @@ async def test_discover_papers_via_session_tool_error_returns_empty():
 
     async with create_connected_server_and_client_session(server._mcp_server) as session:
         await session.initialize()
-        items = await discover_papers_via_session(session, "smart lock")
-    assert items == []
+        with pytest.raises(RuntimeError, match="MCP tool error"):
+            await discover_papers_via_session(session, "smart lock")
 
 
 # --- extract_call_result_items unit-level coverage on hand-built results ----
@@ -111,8 +111,9 @@ class _FakeResult:
         self.isError = isError
 
 
-def test_extract_call_result_items_error_result_is_empty():
-    assert extract_call_result_items(_FakeResult(isError=True)) == []
+def test_extract_call_result_items_error_result_is_observable():
+    with pytest.raises(RuntimeError, match="MCP tool error"):
+        extract_call_result_items(_FakeResult(isError=True))
 
 
 def test_extract_call_result_items_structured_result_key():
