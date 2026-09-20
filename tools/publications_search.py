@@ -1206,6 +1206,34 @@ async def _arxiv_blocks_safe(
         return []
 
 
+def _partial_retrieval_errors(
+    provider_errors: list[str], rate_limited_without_s2: bool
+) -> list[dict[str, str]]:
+    """Build structured diagnostics explaining a partial publication retrieval.
+
+    A partial status previously travelled with ERROR_COUNT 0 and no ERROR marker,
+    because the degradation was described only in free-text notes. Downstream
+    consumers key off parse_error_count, so a genuinely degraded search looked
+    indistinguishable from a clean one.
+
+    Messages reuse provider_error_message via provider_errors, so redaction is
+    the existing single implementation rather than a second one. Nothing is
+    invented: an entry appears only for a degradation that actually occurred, and
+    ordering follows provider_errors so identical outcomes diagnose identically.
+    """
+    errors: list[dict[str, str]] = []
+    if rate_limited_without_s2:
+        errors.append(
+            {
+                "type": "semantic_scholar_rate_limited",
+                "message": "Semantic Scholar returned 429; fallback publication providers were used.",
+            }
+        )
+    for entry in provider_errors:
+        errors.append({"type": "publication_provider_error", "message": str(entry)})
+    return errors
+
+
 async def publications_search(
     query: Any, max_results: int = 5, english_query: str = "", *, _collector: Any = None
 ) -> str:
@@ -1339,8 +1367,14 @@ async def _publications_search(
                 )
 
         if text:
-            partial = bool(provider_errors) or (rate_limited and not s2_blocks)
+            rate_limited_without_s2 = bool(rate_limited and not s2_blocks)
+            partial = bool(provider_errors) or rate_limited_without_s2
             status = "partial_failure" if partial else "ok"
+            partial_errors = (
+                _partial_retrieval_errors(provider_errors, rate_limited_without_s2)
+                if partial
+                else []
+            )
             notes: list[str] = []
             if rate_limited and not s2_blocks:
                 notes.append("Semantic Scholar returned 429; using fallback publication providers.")
@@ -1368,6 +1402,7 @@ async def _publications_search(
                     reliable_no_results=False,
                     query=relevance_query,
                     hits=[block for _score, block in selected_blocks],
+                    errors=partial_errors,
                     notes=notes,
                 ),
                 clean_output(text),
