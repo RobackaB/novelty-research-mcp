@@ -98,10 +98,11 @@ async def test_alpha_search_blocks_deduplicates_across_queries(monkeypatch):
     assert len(blocks) == 1
 
 
-async def test_alphaxiv_blocks_safe_swallows_exceptions(monkeypatch):
+async def test_alphaxiv_blocks_safe_preserves_errors(monkeypatch):
     async def fake_discover(query):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(ps, "alphaxiv_discover_papers", fake_discover)
     blocks = await ps._alpha_blocks_safe(["smart lock"], "smart lock", 5)
     assert blocks == []
+    assert blocks.errors == ["RuntimeError"]
