@@ -16,7 +16,7 @@ from .pdf_fetch import pdf_fetch_text
 from .query_normalize import clean_tool_query
 from .relevance import evidence_score, subject_anchors
 from .requirement_match import atom_coverage, unique_coverage_tokens
-from .result_contract import parse_error_count, parse_reliable_no_results_marker, parse_status_marker
+from .result_contract import parse_completed_marker, parse_error_count, parse_reliable_no_results_marker, parse_status_marker
 from .source_verify import verify_sources
 from .web_search import _compact_content, web_fetch, web_search
 
@@ -456,7 +456,15 @@ async def web_evidence_pack(
         payload = {
             "source_type": "web",
             "status": _status(search_output, hits, warnings, errors),
-            "completed": parse_status_marker(search_output) != "failed",
+            # Completeness is the search's own COMPLETED marker, not a guess from
+            # its status. The previous expression treated anything other than
+            # "failed" as complete, so a partial_failure search that explicitly
+            # reported completed=false surfaced here as completed=true.
+            #
+            # Fetch outcomes deliberately do not enter this value: a failed page
+            # fetch downgrades the pack's status, but it cannot redefine whether
+            # the upstream search retrieval was complete.
+            "completed": bool(parse_completed_marker(search_output)),
             "reliable_no_results": bool(reliable_no_results) if reliable_no_results is not None else False,
             "hits": hits,
             "warnings": warnings,
