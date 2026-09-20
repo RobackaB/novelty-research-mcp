@@ -153,7 +153,7 @@ async def test_arxiv_healthy_paper_about_rate_limits_is_not_a_provider_failure(m
 
     async def search(*args):
         body = "Publication title returned by ArXiv: **Smart door lock rate limit study**.\n" + QUERY + "\nSOURCE: ArXiv"
-        return prepend_markers(NormalizedResult(status="ok", completed=True, hits=[body]), body)
+        return prepend_markers(\n            NormalizedResult(status="ok", completed=True, reliable_no_results=False, hits=[body]),\n            body,\n        )
 
     monkeypatch.setattr(ps, "arxiv_search", search)
     result = await ps._arxiv_blocks_safe([QUERY], QUERY, 10)
