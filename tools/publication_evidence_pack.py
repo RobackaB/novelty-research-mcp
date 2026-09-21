@@ -12,6 +12,8 @@ from typing import Any
 import httpx
 
 from ._hit_sort import sort_hits_by_relevance
+from ._provider_errors import provider_error_message
+from .patent_safety import redact_patent_text
 from .output_cleaner import USER_AGENT, trim_words
 from .pdf_fetch import pdf_fetch_text
 from .publication_fetch import publication_fetch
@@ -164,17 +166,17 @@ def _verification_map(verification: str) -> dict[str, bool]:
 
 def _field(text: str, label: str) -> str:
     """Read the value of a specific field from a fetch tool's text output."""
-    match = re.search(rf"^{re.escape(label)}:\s*(.*?)$", text or "", flags=re.I | re.M)
+    match = re.search(rf"^{re.escape(label)}:[ \t]*(.*?)$", text or "", flags=re.I | re.M)
     return match.group(1).strip() if match else ""
 
 
 def _fetch_level(fetch_output: str) -> str:
     """Map the EVIDENCE_LEVEL value from publication_fetch onto the shared evidence level."""
     raw = _field(fetch_output, "EVIDENCE_LEVEL").upper()
-    if raw == "ABSTRACT_VERIFIED":
-        return "abstract_verified"
     if raw == "FETCH_FAILED" or "TOOL_ERROR:" in (fetch_output or ""):
         return "fetch_failed"
+    if raw in {"ABSTRACT_VERIFIED", "VERIFIED_METADATA", "FETCHED_EXCERPT"}:
+        return raw.lower()
     return "search_snippet_only"
 
 
@@ -182,11 +184,14 @@ def _fetch_summary(fetch_output: str) -> str:
     """Build a short summary from a publication_fetch result."""
     title = _field(fetch_output, "TITLE")
     abstract = _field(fetch_output, "ABSTRACT")
+    content = _field(fetch_output, "CONTENT")
     parts = []
     if title and title != "Unknown was extracted from the publication page.":
         parts.append(f"Fetched title: {title}")
-    if abstract:
+    if abstract and abstract.lower() != "unknown":
         parts.append(f"Fetched abstract: {abstract}")
+    if content:
+        parts.append(f"Fetched excerpt: {content}")
     return trim_words(" ".join(parts), 90)
 
 
@@ -266,13 +271,14 @@ async def publication_evidence_pack(
                 "completed": False,
                 "reliable_no_results": False,
                 "hits": [],
-                "errors": [{"type": "publications_search_failed", "message": str(exc)}],
+                "errors": [{"type": "publications_search_failed", "message": provider_error_message(exc)}],
                 "warnings": warnings,
             },
             ensure_ascii=False,
             indent=2,
         )
 
+    search_output = redact_patent_text(search_output)
     search_status = parse_status_marker(search_output) or "failed"
     search_completed = bool(parse_completed_marker(search_output))
     reliable_no_results = bool(parse_reliable_no_results_marker(search_output))
@@ -319,11 +325,11 @@ async def publication_evidence_pack(
         )
         for item in fetched:
             if isinstance(item, Exception):
-                text = f"TOOL_ERROR: publication_fetch\nREASON: {item}\nSTATUS: FAILED\nEVIDENCE_LEVEL: FETCH_FAILED"
+                text = f"TOOL_ERROR: publication_fetch\nREASON: {provider_error_message(item)}\nSTATUS: FAILED\nEVIDENCE_LEVEL: FETCH_FAILED"
                 warnings.append(trim_words(text, 50))
                 fetch_outputs.append(text)
             else:
-                fetch_outputs.append(str(item))
+                fetch_outputs.append(redact_patent_text(str(item)))
 
     # Full texts of freely available PDFs (arXiv, direct .pdf links, or open-access
     # PDFs found through Unpaywall by DOI), so requirement coverage is measured
@@ -350,7 +356,7 @@ async def publication_evidence_pack(
             for (index, _url), text in zip(pdf_targets, pdf_texts):
                 if isinstance(text, Exception) or not text:
                     continue
-                fulltext_by_index[index] = str(text)
+                fulltext_by_index[index] = redact_patent_text(str(text))
 
     verification = ""
     if candidates:
@@ -361,7 +367,7 @@ async def publication_evidence_pack(
                 warnings.append("URL verification failed; verified_url values remain false unless ALIVE was returned.")
         except Exception as exc:
             verification_failed = True
-            warnings.append(f"URL verification failed: {exc}")
+            warnings.append(f"URL verification failed: {provider_error_message(exc)}")
     verified = _verification_map(verification)
 
     hits: list[dict[str, object]] = []
