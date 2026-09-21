@@ -3579,9 +3579,9 @@ async def publication_evidence_to_session(
             # failure, and can never turn a successful retrieval into a failure.
             _persist_decision_events(_collector)
     except TimeoutError as exc:
-        return ack(research_session_record_failure(session_id, "publication", clean_query, "timeout", "timeout", str(exc), int(begin["attempt"]), run_id, "publication_sqlite_writer_agent", english_query_clean))
+        return ack(research_session_record_failure(session_id, "publication", clean_query, "timeout", "timeout", provider_error_message(exc), int(begin["attempt"]), run_id, "publication_sqlite_writer_agent", english_query_clean))
     except Exception as exc:
-        return ack(research_session_record_failure(session_id, "publication", clean_query, "provider_error", exc.__class__.__name__, str(exc), int(begin["attempt"]), run_id, "publication_sqlite_writer_agent", english_query_clean))
+        return ack(research_session_record_failure(session_id, "publication", clean_query, "provider_error", exc.__class__.__name__, provider_error_message(exc), int(begin["attempt"]), run_id, "publication_sqlite_writer_agent", english_query_clean))
     return ack(research_session_save_evidence(
         session_id=session_id,
         source_type="publication",
