@@ -96,6 +96,12 @@ def grade_source(source: dict[str, Any] | None, source_type: str = "") -> dict[s
         }
     status = str(source.get("status") or "failed").strip().lower()
     completed = source.get("completed") is True
+    # Retrieval completeness is a separate dimension from evidence strength. It
+    # is keyed on STRUCTURED errors, which every evidence pack reserves for
+    # search/provider failures; detail-fetch and URL-verification failures go to
+    # warnings instead. So a page that failed to fetch after an otherwise
+    # complete search does not mark the search incomplete.
+    search_incomplete = status == "partial_failure" and bool(_as_list(source.get("errors")))
     reliable_no_results = source.get("reliable_no_results") is True
     hits = [hit for hit in _as_list(source.get("hits")) if isinstance(hit, dict)]
     if not hits:
@@ -110,6 +116,7 @@ def grade_source(source: dict[str, Any] | None, source_type: str = "") -> dict[s
             "top_hit_quality": 0.0,
             "usable_for_final": usable,
             "needs_retry": not usable,
+            "search_incomplete": search_incomplete,
             "exact_combination_candidate_found": False,
         }
 
@@ -175,6 +182,7 @@ def grade_source(source: dict[str, Any] | None, source_type: str = "") -> dict[s
         "usable_for_final": grade in {"strong", "medium", "reliable_no_results"},
         "needs_retry": grade in {"weak", "failed_retrieval", "missing"},
         "exact_combination_candidate_found": exact_candidate,
+        "search_incomplete": search_incomplete,
     }
 
 
@@ -190,6 +198,11 @@ def _classify_retrieval(source_grades: dict[str, dict[str, Any]]) -> str:
     usable = {"strong", "medium", "reliable_no_results"}
     weak_or_failed = {"weak", "failed_retrieval", "missing"}
     if all(grade in usable for grade in grades):
+        # Usable evidence everywhere is not the same as complete retrieval. A
+        # source whose search/provider retrieval was genuinely incomplete keeps
+        # its strong evidence, but the run is degraded rather than complete.
+        if any(item.get("search_incomplete") for item in source_grades.values()):
+            return "degraded"
         return "complete"
     has_strong_or_medium = any(grade in {"strong", "medium"} for grade in grades)
     has_failed = any(grade in {"failed_retrieval", "missing"} for grade in grades)
