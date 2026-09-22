@@ -2704,11 +2704,29 @@ def _source_check(
         normalized = _safe_json_loads(row["normalized_json"], {}) or {}
         quality = grade_source(normalized if isinstance(normalized, dict) else None, source_type)
         quality_grade = str(quality.get("quality_grade") or "missing")
-        if quality_grade == "strong":
+        search_incomplete = bool(quality.get("search_incomplete"))
+        if quality_grade == "strong" and search_incomplete and attempt_count < max_attempts_per_source:
+            # Strong surviving evidence must not hide incomplete retrieval. The
+            # evidence is kept and its grade is unchanged, but a search/provider
+            # failure with budget left stays retryable -- mirroring the medium
+            # branch, which already did this.
+            state = "needs_retry"
+            ready = False
+            blocking = True
+            reason = (
+                "Source has strong evidence but its search/provider retrieval was "
+                "incomplete; retry while budget remains."
+            )
+        elif quality_grade == "strong":
             state = "strong"
             ready = True
             blocking = False
-            reason = "Source has verified strong evidence."
+            reason = (
+                "Source has strong evidence; its retrieval remained incomplete after "
+                "the retry budget was exhausted."
+                if search_incomplete
+                else "Source has verified strong evidence."
+            )
         elif quality_grade == "medium":
             if status == "partial_failure" and attempt_count < max_attempts_per_source:
                 state = "needs_retry"
@@ -2743,6 +2761,7 @@ def _source_check(
             "status": status,
             "completed": completed,
             "reliable_no_results": reliable_no_results,
+            "search_incomplete": search_incomplete,
             "hit_count": hit_count,
             "warning_count": int(row["warning_count"] or 0),
             "error_count": int(row["error_count"] or 0),
@@ -2982,7 +3001,16 @@ def research_session_checklist(
 
     blocking_checks = [check for check in source_checks if check.get("blocking")]
     needs_loop = bool(actions)
-    complete = all_sources_present and not blocking_checks and not low_total_evidence
+    # A run whose evidence is usable everywhere can still have incomplete
+    # retrieval. Finalisation may proceed once retries are exhausted, but the run
+    # is not reported complete while any source's search/provider retrieval was.
+    retrieval_incomplete = any(check.get("search_incomplete") for check in source_checks)
+    complete = (
+        all_sources_present
+        and not blocking_checks
+        and not low_total_evidence
+        and not retrieval_incomplete
+    )
     can_finalize = all_sources_present and not blocking_checks and not needs_loop
     if all_sources_present and not blocking_checks and low_total_evidence and not actions:
         can_finalize = True
